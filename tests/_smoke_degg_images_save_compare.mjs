@@ -284,7 +284,9 @@ function makeNode() {
   node.widgets.push(
     { name: "save_mode", type: "toggle", value: true, options: {}, last_y: 26, computeSize: () => [0, 24] },
     { name: "filename_prefix", type: "text", value: "ComfyUI", options: {}, last_y: 50, computeSize: () => [0, 24] },
-    { name: "mode", type: "combo", value: "Off", options: {}, last_y: 74, computeSize: () => [0, 24] },
+    // combo: фронтенд сам кладёт сюда значения из INPUT_TYPES (options.values),
+    // а подписи отдаёт отдельно через options.getOptionLabel.
+    { name: "mode", type: "combo", value: "Off", options: { values: DSC.MODES.slice() }, last_y: 74, computeSize: () => [0, 24] },
     { name: "opacity", type: "number", value: 0.5, options: {}, last_y: 98, computeSize: () => [0, 24] },
     { name: "blink_speed", type: "number", value: 1.0, options: {}, last_y: 122, computeSize: () => [0, 24] },
   );
@@ -1026,10 +1028,10 @@ check("без картинок: navEnabled false", nav(navNode) === false, Strin
 helpBtn.dispatch("mouseenter", {});
 check("подсказка: показана по наведению на «?»", helpBox.style.display === "block");
 check("подсказка: содержит режимы и зум", /Slider/.test(helpBox.textContent || "") || helpBox.children.length > 0);
-check("п.3: HELP в SBS — виды «Пара/1/2», без «Шторка/Сетка»", (() => {
+check("п.3: HELP в SBS — виды «Pair/1/2» (EN), без «Шторка/Сетка»", (() => {
   const modeItem = (DSC.HELP || []).find((h) => h.name === "mode") || { lines: [] };
   const sbsLine = (modeItem.lines || []).find((l) => l.indexOf("Side-by-Side") === 0) || "";
-  return sbsLine !== "" && /Пара/.test(sbsLine) && !/Шторка|Сетка/.test(sbsLine);
+  return sbsLine !== "" && /Pair/.test(sbsLine) && !/Шторка|Сетка/.test(sbsLine);
 })(), JSON.stringify(((DSC.HELP || []).find((h) => h.name === "mode") || { lines: [] }).lines));
 helpBtn.dispatch("mouseleave", {});
 check("подсказка: спрятана по уходу курсора (не залипает)", helpBox.style.display === "none");
@@ -1208,6 +1210,83 @@ check("metaUrl: кодирует имя и subfolder",
 check("metaUrl: без filename → пустая строка", DSC.metaUrl(null) === "");
 check("роуты: OPEN_URI совпадает с Python",
   DSC.OPEN_URI === "/degg_images_save_compare/open_file", DSC.OPEN_URI);
+
+
+// ── локализация: RU только при русском интерфейсе ComfyUI, иначе EN ───────
+check("локализация: без настроек ComfyUI язык — английский (не RU)",
+  typeof DSC.isRu === "function" && DSC.isRu() === false,
+  String(DSC.isRu && DSC.isRu()));
+check("локализация: заголовки видов по умолчанию EN",
+  typeof DSC.viewItems === "function"
+  && DSC.viewItems().map((i) => i.title).join("|") === "Pair|Image 1|Image 2",
+  JSON.stringify(DSC.viewItems && DSC.viewItems()));
+check("локализация: RU-строки при override ru (виды + подписи кнопки)", (() => {
+  if (typeof DSC.setLocaleOverride !== "function") return false;
+  DSC.setLocaleOverride("ru");
+  return DSC.isRu() === true
+    && DSC.openLabelEmpty() === "Нет изображения"
+    && DSC.openLabelReady() === "Открыть в просмотрщике"
+    && DSC.viewItems().map((i) => i.title).join("|") === "Пара|Изображение 1|Изображение 2";
+})(), JSON.stringify(DSC.viewItems && DSC.viewItems()));
+check("локализация: справка на русском при override ru", (() => {
+  const items = DSC.helpItems ? DSC.helpItems() : [];
+  const modeItem = items.find((h) => h.name === "mode") || { lines: [] };
+  const sbs = (modeItem.lines || []).find((l) => l.indexOf("Side-by-Side") === 0) || "";
+  return /Пара/.test(sbs);
+})(), String((DSC.helpItems ? DSC.helpItems() : []).length));
+check("локализация: подсказка на русском при override ru",
+  typeof DSC.hintText === "function" && /Подключите/.test(DSC.hintText()),
+  String(DSC.hintText && DSC.hintText()));
+check("локализация: значения combo MODES НЕ переводятся",
+  Array.isArray(DSC.MODES)
+  && DSC.MODES.join(",") === "Off,Slider,Side-by-Side,Overlap,Difference,Blink"
+  && DSC.MODES.every((m) => !/[\u0400-\u04FF]/.test(m)), JSON.stringify(DSC.MODES));
+// ⭐ Подписи combo: RU-подписи отдаёт getOptionLabel, а options.values
+// (протокол) остаются нетронутыми. Подмена values — ровно тот дефект, что
+// убивал превью: currentMode() делал MODES.indexOf(...) < 0 -> "Off" и ни одна
+// ветка applyMode не срабатывала.
+const modeW = DSC.getWidget(node, "mode");
+const optLabel = modeW && modeW.options ? modeW.options.getOptionLabel : null;
+check("локализация: combo отдаёт RU-подписи режимов через getOptionLabel",
+  typeof optLabel === "function"
+  && optLabel("Off") === "Выкл." && optLabel("Slider") === "Шторка"
+  && optLabel("Side-by-Side") === "Сбоку" && optLabel("Overlap") === "Наложение"
+  && optLabel("Difference") === "Разница" && optLabel("Blink") === "Мигание",
+  optLabel ? String(optLabel("Slider")) : "нет getOptionLabel");
+check("локализация: getOptionLabel не тронул options.values (протокольные значения)",
+  !!(modeW && modeW.options && Array.isArray(modeW.options.values)
+    && modeW.options.values.join(",") === DSC.MODES.join(",")),
+  JSON.stringify(modeW && modeW.options && modeW.options.values));
+check("локализация: currentMode() под RU возвращает настоящий режим", (() => {
+  if (typeof DSC.currentMode !== "function" || !modeW) return false;
+  const ok = DSC.MODES.map((m) => {
+    modeW.value = m;
+    return DSC.currentMode(node) === m;
+  });
+  modeW.value = "Off";
+  return ok.every(Boolean);
+})(), String(DSC.currentMode && DSC.currentMode(node)));
+check("локализация: подпись режима не затирает значение виджета", (() => {
+  if (typeof optLabel !== "function" || !modeW) return false;
+  modeW.value = "Slider";
+  optLabel("Slider");
+  const ok = modeW.value === "Slider";
+  modeW.value = "Off";
+  return ok;
+})());
+check("локализация: подписи режимов — EN при не-русском языке", (() => {
+  if (typeof optLabel !== "function" || typeof DSC.setLocaleOverride !== "function") return false;
+  DSC.setLocaleOverride("en");
+  const en = optLabel("Slider") === "Slider" && optLabel("Off") === "Off";
+  DSC.setLocaleOverride("ru"); // дальше по блоку ожидается RU
+  return en;
+})(), optLabel ? String(optLabel("Slider")) : "нет getOptionLabel");
+
+check("локализация: возврат к EN после сброса override", (() => {
+  if (typeof DSC.setLocaleOverride !== "function") return false;
+  DSC.setLocaleOverride(null);
+  return DSC.isRu() === false && DSC.openLabelEmpty() === "No image";
+})());
 
 console.log("");
 console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);

@@ -21,6 +21,8 @@
 | `__init__.py` | экспорт маппингов, `WEB_DIRECTORY = "web"` |
 | `tests/` | Python-песочница, JS-смоук, статический аудит |
 | `check.json` | 3 проверки для `_process/check.py` |
+| `locales/en/nodeDefs.json` | EN-перевод слотов ноды (`display_name`, `description`, `inputs.*.name|tooltip`, `outputs.0.name`) |
+| `locales/ru/nodeDefs.json` | RU-перевод тех же слотов — **единственное место**, где русский для nodeDefs |
 
 ## 3. Python: класс DeggImagesSaveCompare
 
@@ -33,7 +35,7 @@
 | `image_1` | `IMAGE` | — | **обязательный** вход: основное изображение (проходное) |
 | `save_mode` | `BOOLEAN` | `True` | `True` = Save (output + префикс), `False` = Preview (temp). Подписи: **Save** / **Preview** |
 | `filename_prefix` | `STRING` | `"ComfyUI"` | префикс файла Image 1 (только в режиме Save) |
-| `mode` | combo | `"Off"` | `Off` (просмотрщик Image 1, по умолчанию) / `Slider` / `Side-by-Side` / `Overlap` / `Difference` / `Blink` |
+| `mode` | combo | `"Off"` | `Off` (просмотрщик Image 1, по умолчанию) / `Slider` / `Side-by-Side` / `Overlap` / `Difference` / `Blink`. Значения — протокольные, по-английски; **подписи** в списке локализуются (§5.2) |
 | `opacity` | `FLOAT` | `0.5` | 0.0–1.0, для режима Overlap |
 | `blink_speed` | `FLOAT` | `1.0` | 1.0–3.0 сек, длительность фазы Blink |
 | `image_2` | `IMAGE` | — | **опциональный** вход: изображение для сравнения |
@@ -255,7 +257,71 @@ JSON, `onExecuted` повторно **не вызывается** — слоты
   может ответить синхронно, и проверка `st.img1 === img` по старому значению не
   сработала бы — битый слой остался бы в срезе.
 
-## 5. Отличия от исходников (осознанные)
+## 5. Локализация (RU/EN)
+
+**Требование:** русский интерфейс ComfyUI → RU, любой другой язык → EN.
+
+### 5.1. Что где лежит
+
+| Что переводим | Где | Примечание |
+|---|---|---|
+| Слоты ноды (имена/тултипы/выходы) | `locales/{en,ru}/nodeDefs.json` | официальный механизм ComfyUI |
+| Строки кнопок, справки, подписи в футере | `web/js/…js`: константы `*_RU` + функции `openLabelReady()`, `openLabelEmpty()`, `viewItems()`, `helpItems()`, `hintText()` | текст, который не проходит через nodeDefs |
+| Подписи вариантов combo | `web/js/…js`: `MODE_LABELS_RU` + `modeLabel()` | **только отображение**, значения не тронуты |
+| `tooltip` и `DESCRIPTION` в Python | `degg_images_save_compare.py` | **английский язык-источник** (см. ниже) |
+
+⛔ **Python — английский источник.** Для локали без своего файла фронтенд
+показывает backend-значение, поэтому русские тултипы в Python получил бы на экране
+и немец. РУ живёт только в `locales/ru/nodeDefs.json`.
+
+Чтение текущего языка — `app.extensionManager.setting.get("Comfy.Locale")`, фолбэк
+`app.ui.settings.getSettingValue("Comfy.Locale")`, затем `navigator.language`; сравнение
+**префиксом** (`/^ru/i`), т.к. возможны региональные варианты. Тестовый вход —
+`setLocaleOverride("ru" | "en" | null)`.
+
+### 5.2. ⛔ Протокольные значения `mode` — их нельзя переводить
+
+| Канал | Что это | Можно переводить? |
+|---|---|---|
+| `MODES` / значения `INPUT_TYPES` | сверяются в Python (`if mode not in MODES: mode = "Slider"`) и в JS (`currentMode()` → `MODES.indexOf`) | ❌ никогда |
+| `widget.value`, `widget.options.values` | то, что уходит в API и в сериализацию | ❌ никогда |
+| `widget.options.getOptionLabel` | подпись в выпадающем списке | ✅ единственный канал |
+
+В `hookModeWidgets`:
+
+```js
+if (name === "mode") {
+  w.options = w.options || {};
+  w.options.getOptionLabel = (v) => modeLabel(v);
+}
+```
+
+RU-подписи (`MODE_LABELS_RU`):
+`Off → Выкл.`, `Slider → Шторка`, `Side-by-Side → Сбоку`, `Overlap → Наложение`,
+`Difference → Разница`, `Blink → Мигание`. EN-вариант — значение как есть.
+
+**Почему это было главным багом:** подмена `options.values` на русские строки
+даёт **молчаливый** отказ — `currentMode()` возвращает `"Off"`, и все ветки
+Slider/Overlap/Difference/Blink просто не срабатывают: превью не появляется,
+а ошибки нигде нет (сервер тихо приводит значение к `"Slider"`). Два
+независимых места глотают расхождение, поэтому ищут не краш, а расхождение
+подписи и значения. Зафиксировано тестами (§7).
+
+Подписи отдаются в момент отрисовки — смена языка подхватывается без перезагрузки
+ноды; читает их оба фронтенда (legacy `ComboWidget.ts:149,160-164`, Nodes 2.0
+`useWidgetSelectItems.ts:37-40` → `WidgetSelectDropdown.vue:88`), и в колбэк
+всегда уходит исходное значение.
+
+### 5.3. Когда перевод применяется
+
+`locales/` читает бэкенд на старте (`build_translations()` → `@lru_cache(maxsize=1)`,
+маршрут `GET /i18n`, скан `custom_nodes/*/locales/`). Поэтому:
+
+- правка `locales/` → **перезапуск ComfyUI + Hard Reload**;
+- правка `web/js/` → только **Hard Reload**;
+- файл обязан быть **UTF-8 без BOM** (иначе бэкенд его не возьмёт и перевода не будет).
+
+## 6. Отличия от исходников (осознанные)
 
 | Отличие | Почему |
 |---|---|
@@ -269,8 +335,10 @@ JSON, `onExecuted` повторно **не вызывается** — слоты
 | Кнопка «Сохранить текущий вид» и роуты сохранения/GIF удалены | по задаче |
 | `image_1` обязателен | выход ноды = Image 1, поэтому источник определён всегда |
 | В режиме Preview видны только temp-файлы | как в `SavePreviewImage` |
+| Подписи режимов combo локализованы, значения — нет | значения — протокольные; подмена `options.values` ломает ноду молча, поэтому подписи идут через `getOptionLabel` (§5.2) |
+| Python с английскими tooltip/`DESCRIPTION` | для локали без своего файла фронтенд показывает backend-текст — русский показывался бы всем (§5.1) |
 
-## 6. Проверки
+## 7. Проверки
 
 ```bash
 cd Degg_Images_Save_Compare
@@ -280,7 +348,18 @@ node tests/_audit_degg_images_save_compare.mjs   # → аудит чист (CRLF
 python ../_process/check.py Degg_Images_Save_Compare
 ```
 
-## 7. Рабочая копия
+Что проверяет аудит/смоук по локализации (§5):
+
+| Проверка | Что ловит |
+|---|---|
+| `locales/{en,ru}/nodeDefs.json`: существует, UTF-8 без BOM, валидный JSON, ключ ноды, `display_name`/`description`, `name`+`tooltip` для **каждого** слота из `INPUT_TYPES`, `outputs.0.name` | потерянный/битый перевод |
+| RU реально отличается от EN и содержит кириллицу | не переведённый файл-дубль |
+| Python без кириллицы в tooltip/`DESCRIPTION` | EN-источник не подменили |
+| `!/options\.values\s*=/` (по коду **без комментариев**) | подмена протокольных значений |
+| `currentMode()` под RU возвращает настоящий режим; `getOptionLabel` отдаёт RU-подписи, значения и `w.value` не тронуты | регресс «превью не появляется» |
+| заглушка комбо содержит `options.values` из INPUT_TYPES | слепой смоук (заглушка `{}` не поймала бы подмену) |
+
+## 8. Рабочая копия
 
 `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Degg_Images_Save_Compare\`
 (синхронизация: `python sync.py Degg_Images_Save_Compare`, затем перезапуск ComfyUI)

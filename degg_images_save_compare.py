@@ -77,22 +77,22 @@ class DeggImagesSaveCompare:
             "required": {
                 # IMAGE-сокеты рисуются над виджетами в порядке объявления
                 "image_1": ("IMAGE", {
-                    "tooltip": "Основное изображение: сохраняется/превью и уходит на выход."
+                    "tooltip": "Main image: saved/previewed and passed to the output."
                 }),
                 # порядок виджетов = порядок объявления (сверху вниз)
                 "save_mode": ("BOOLEAN", {
                     "default": True,
                     "label_on": "Save",
                     "label_off": "Preview",
-                    "tooltip": "Save — в output с префиксом; Preview — во временную папку."
+                    "tooltip": "Save — into output with the prefix; Preview — into the temp folder."
                 }),
                 "filename_prefix": ("STRING", {
                     "default": "ComfyUI",
-                    "tooltip": "Префикс файла Image 1 (используется только в режиме Save)."
+                    "tooltip": "Image 1 filename prefix (Save mode only)."
                 }),
                 "mode": (MODES, {
                     "default": "Off",
-                    "tooltip": "Режим сравнения Image 1 и Image 2 (Off — просмотрщик Image 1, по умолчанию)."
+                    "tooltip": "Image 1 / Image 2 comparison mode (Off — Image 1 viewer, default)."
                 }),
                 "opacity": ("FLOAT", {
                     "default": 0.5,
@@ -100,7 +100,7 @@ class DeggImagesSaveCompare:
                     "max": 1.0,
                     "step": 0.01,
                     "display": "slider",
-                    "tooltip": "Непрозрачность Image 1 в режиме Overlap."
+                    "tooltip": "Image 1 opacity in Overlap mode."
                 }),
                 "blink_speed": ("FLOAT", {
                     "default": 1.0,
@@ -108,12 +108,12 @@ class DeggImagesSaveCompare:
                     "max": 3.0,
                     "step": 0.05,
                     "display": "slider",
-                    "tooltip": "Длительность фазы мигания в режиме Blink, сек."
+                    "tooltip": "Blink phase duration in Blink mode, sec."
                 }),
             },
             "optional": {
                 "image_2": ("IMAGE", {
-                    "tooltip": "Изображение для сравнения (только для просмотра)."
+                    "tooltip": "Image to compare with (view only)."
                 }),
             },
             "hidden": {
@@ -128,7 +128,7 @@ class DeggImagesSaveCompare:
     OUTPUT_NODE = True
     CATEGORY = "My_custom_nodes/Image"
     DESCRIPTION = (
-        "Save/Preview основного изображения и интерактивное сравнение с вторым "
+        "Save/Preview the main image and compare it interactively with a second one "
         "(Slider / Side-by-Side / Overlap / Difference / Blink)."
     )
 

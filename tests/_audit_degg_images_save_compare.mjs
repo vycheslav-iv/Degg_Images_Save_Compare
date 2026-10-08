@@ -377,6 +377,97 @@ check("README.md корня содержит Degg_Images_Save_Compare",
 check("bundle: проект лежит прямо в корне (без вложенных папок)",
   fs.existsSync(path.join(BUNDLE, "Degg_Images_Save_Compare", "__init__.py")));
 
+
+// ── 8. Локализация (официальный механизм: locales/<lang>/nodeDefs.json) ───
+// Требование: русский интерфейс ComfyUI -> RU, любой другой -> EN.
+// Официальный механизм ComfyUI (app/custom_node_manager.py + i18n фронтенда,
+// resolveNodeDefText/resolveNodeDefSlotText) умеет:
+//   display_name / description / inputs.<name>.name|tooltip / outputs.<i>.name.// Значения combo (MODES) — протокольные: Python сверяет их с MODES, поэтому
+// подмена options.values ломает ноду и запрещена.
+// Подписи combo переводить МОЖНО и нужно — не через values, а через
+// widget.options.getOptionLabel: фронтенд читает его отдельно от values
+// (legacy ComboWidget.draw/click, Nodes 2.0 useWidgetSelectItems ->
+// WidgetSelectDropdown -> getDisplayLabel), а в колбэк/сериализацию уходит
+// исходное value.
+const NODE_DEF_KEY = "Degg_Images_Save_Compare";
+const localeDefs = {};
+for (const lang of ["en", "ru"]) {
+  const rel = `locales/${lang}/nodeDefs.json`;
+  const abs = path.join(ROOT, rel);
+  const raw = fs.existsSync(abs) ? fs.readFileSync(abs) : null;
+  check(`${rel} существует`, !!raw);
+  if (!raw) continue;
+  check(`${rel}: UTF-8 без BOM`,
+    !(raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf));
+  let j = null;
+  try { j = JSON.parse(raw.toString("utf8")); } catch (e) { /* ниже */ }
+  check(`${rel}: валидный JSON`, !!j);
+  if (!j) continue;
+  const def = j[NODE_DEF_KEY];
+  check(`${rel}: ключ ноды ${NODE_DEF_KEY}`, !!def);
+  if (!def) continue;
+  localeDefs[lang] = def;
+  check(`${rel}: display_name заполнен`,
+    typeof def.display_name === "string" && def.display_name.trim().length > 0);
+  check(`${rel}: description заполнен`,
+    typeof def.description === "string" && def.description.trim().length > 0);
+  for (const slot of [...pyInputs, ...pyOptional]) {
+    const s = def.inputs && def.inputs[slot];
+    check(`${rel}: inputs.${slot}.name`, !!(s && s.name));
+    check(`${rel}: inputs.${slot}.tooltip`, !!(s && s.tooltip));
+  }
+  check(`${rel}: outputs.0.name`,
+    !!(def.outputs && def.outputs["0"] && def.outputs["0"].name));
+}
+if (localeDefs.en && localeDefs.ru) {
+  check("локализация: RU реально переведён (display_name != EN)",
+    localeDefs.ru.display_name !== localeDefs.en.display_name,
+    `${localeDefs.en.display_name} / ${localeDefs.ru.display_name}`);
+  check("локализация: RU-подписи входов содержат кириллицу",
+    [...pyInputs, ...pyOptional].every((s) =>
+      !!localeDefs.ru.inputs[s] && /[\u0400-\u04FF]/.test(localeDefs.ru.inputs[s].name)));
+}
+
+// Python обязан быть английским источником: для локалей, которых нет в
+// locales/ (de, ja, ...), фронтенд отдаёт backend-значение (tooltip/description),
+// поэтому русские тултипы в Python показали бы немцу русский текст.
+if (PY) {
+  const tooltips = [...PY.matchAll(/tooltip":\s*"([^"]*)"/g)].map((m) => m[1]);
+  check("python: тултипы без кириллицы (EN — источник, RU живёт в locales/ru)",
+    tooltips.length > 0 && tooltips.every((t) => !/[\u0400-\u04FF]/.test(t)),
+    JSON.stringify(tooltips));
+  const descBlock = (PY.match(/DESCRIPTION\s*=\s*\(([\s\S]*?)\n\s*\)/) || [])[1] || "";
+  check("python: DESCRIPTION без кириллицы (EN — источник)",
+    descBlock.length > 0 && !/[\u0400-\u04FF]/.test(descBlock), descBlock.slice(0, 60));
+}
+
+if (JS) {
+  // ⛔ Ищем ТОЛЬКО в коде (JSC): строка-КОММЕНТАРИЙ не должна закрывать
+  // проверку — мутация M2 показала слепой детектор при поиске по JS целиком.
+  has(JSC, /extensionManager[\s\S]{0,160}?setting[\s\S]{0,80}?\.get\(/,
+    "js: язык читается через app.extensionManager.setting.get('Comfy.Locale') (по коду)");
+  has(JSC, /getSettingValue\([\s\S]{0,40}?Comfy\.Locale/,
+    "js: фолбэк — app.ui.settings.getSettingValue('Comfy.Locale')");
+  has(JSC, /function isRu\(\)\s*\{\s*return\s+\/\^ru\/i\.test\(readComfyLocale\(\)\)/,
+    "js: isRu() реально читает readComfyLocale (RU только для ru-локали)");
+  has(JSC, /function setLocaleOverride\(/, "js: setLocaleOverride() для тестов");  check("js: значения combo (MODES) НЕ переводятся — протокольные значения",
+    !/options\.values\s*=/.test(JSC));
+  // Подписи режимов — через getOptionLabel, values остаются нетронутыми.
+  has(JSC, /MODE_LABELS_RU\s*=\s*\{/, "js: таблица RU-подписей режимов");
+  has(JSC, /function modeLabel\(/, "js: modeLabel(value) — RU-подпись либо значение как есть");
+  check("js: подписи combo отдаются через options.getOptionLabel (values не трогаем)",
+    /options\.getOptionLabel\s*=/.test(JSC) && !/options\.values\s*=/.test(JSC));
+  check("js: getOptionLabel привязан к modeLabel (не к подмене значений)",
+    /options\.getOptionLabel\s*=\s*\([^)]*\)\s*=>\s*modeLabel\(/.test(JSC));
+  has(JS, /function viewItems\(/, "js: заголовки селектора вида локале-зависимы");
+  has(JS, /VIEW_TITLES_RU/, "js: RU-заголовки видов (Пара/Изображение 1/2)");
+  has(JS, /OPEN_LABEL_EMPTY_RU/, "js: RU-подписи кнопки открытия");
+  has(JS, /HELP_RU/, "js: RU-версия справки");
+  has(JS, /function hintText\(/, "js: подсказка локале-зависима");
+  check("js: в EN-константах подписей нет кириллицы (RU — в *_RU)",
+    !/OPEN_LABEL_(READY|EMPTY)\s*=\s*"[^"]*[\u0400-\u04FF]/.test(JS));
+}
+
 console.log("");
 console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);
 if (errors.length) {

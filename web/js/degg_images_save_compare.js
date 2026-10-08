@@ -84,6 +84,52 @@ function pickApi() {
 const app = pickApp();
 const api = pickApi();
 
+// ── язык интерфейса ComfyUI ───────────────────────────────────────────────
+// Требование: русский интерфейс ComfyUI → RU, любой другой язык → EN.
+// Официальный путь чтения настройки из расширения —
+// app.extensionManager.setting.get("Comfy.Locale") (проверено по исходникам
+// фронтенда: settingStore / useToolManager). Легаси-путь
+// app.ui.settings.getSettingValue — фолбэк, затем navigator.language.
+// ⛔ Значения combo (MODES) НЕ переводятся: Off/Slider/... — протокольные
+// значения (Python сверяет их с MODES), подмена options.values ломает ноду.
+// ✅ Подписи combo переводить МОЖНО — см. MODE_LABELS_RU/modeLabel ниже:
+// widget.options.getOptionLabel отдаёт подпись, а в value уходит протокол.
+let LOCALE_OVERRIDE = null; // для тестов: "ru" | "en" | null
+
+function readComfyLocale() {
+  if (LOCALE_OVERRIDE) return LOCALE_OVERRIDE;
+  const a = app || pickApp();
+  try {
+    const em = a && a.extensionManager;
+    if (em && em.setting && typeof em.setting.get === "function") {
+      const v = em.setting.get("Comfy.Locale");
+      if (typeof v === "string" && v) return v;
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const ui = a && a.ui;
+    if (ui && ui.settings && typeof ui.settings.getSettingValue === "function") {
+      const v = ui.settings.getSettingValue("Comfy.Locale");
+      if (typeof v === "string" && v) return v;
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    if (typeof navigator !== "undefined" && navigator.language) return navigator.language;
+  } catch (e) { /* ignore */ }
+  return "en";
+}
+
+/** RU — только когда интерфейс ComfyUI русский; любой другой язык → EN. */
+function isRu() {
+  return /^ru/i.test(readComfyLocale());
+}
+
+/** Тестовый override языка (без ComfyUI настройки недоступны). */
+function setLocaleOverride(v) {
+  LOCALE_OVERRIDE = (v === "ru" || v === "en") ? v : null;
+  return LOCALE_OVERRIDE;
+}
+
 // ── константы ─────────────────────────────────────────────────────────────
 
 const EXT_NAME = "Degg_Images_Save_Compare";
@@ -118,23 +164,100 @@ const BLINK_KEYFRAMES = "dscBlink";
 // П.3: Шторка и Сетка давали одинаковую пару половин — «Сетка» удалена,
 // у элемента пары иконка «два прямоугольника рядом» (фолбэк — квадрат).
 const VIEW_ITEMS = [
-  { id: "dsc-view-split", view: "split", title: "Пара", pair: true },
+  { id: "dsc-view-split", view: "split", title: "Pair", pair: true },
   { id: "dsc-view-img1", view: "img1", title: "Image 1" },
   { id: "dsc-view-img2", view: "img2", title: "Image 2" },
 ];
 const VIEW_VALUES = ["split", "img1", "img2"];
 
+// RU-заголовки видов (EN-версия — в VIEW_ITEMS).
+const VIEW_TITLES_RU = { split: "Пара", img1: "Изображение 1", img2: "Изображение 2" };
+
+/** Заголовки селектора вида по языку интерфейса. */
+function viewItems() {
+  const ru = isRu();
+  return VIEW_ITEMS.map((i) => (ru ? Object.assign({}, i, { title: VIEW_TITLES_RU[i.view] }) : i));
+}
+
 const OPEN_URI = "/degg_images_save_compare/open_file";
 
 const OPEN_LABEL_READY = "Open in Viewer";
 const OPEN_LABEL_EMPTY = "No image";
+const OPEN_LABEL_READY_RU = "Открыть в просмотрщике";
+const OPEN_LABEL_EMPTY_RU = "Нет изображения";
+
+/** Подписи кнопки открытия по языку интерфейса. */
+function openLabelReady() { return isRu() ? OPEN_LABEL_READY_RU : OPEN_LABEL_READY; }
+function openLabelEmpty() { return isRu() ? OPEN_LABEL_EMPTY_RU : OPEN_LABEL_EMPTY; }
 
 const MODES = ["Off", "Slider", "Side-by-Side", "Overlap", "Difference", "Blink"];
+
+// RU-подписи режимов. Сами значения MODES ("Off"/"Slider"/…) — протокольные:
+// Python сверяет их с MODES, а JS — через currentMode(); подмена options.values
+// ломает ноду (именно это убивало превью). Переводим ТОЛЬКО отображение —
+// через widget.options.getOptionLabel, который фронтенд читает отдельно от
+// values: legacy ComboWidget.draw/click и Nodes 2.0 useWidgetSelectItems →
+// WidgetSelectDropdown → getDisplayLabel; в колбэк/сериализацию уходит value.
+const MODE_LABELS_RU = {
+  "Off": "Выкл.",
+  "Slider": "Шторка",
+  "Side-by-Side": "Сбоку",
+  "Overlap": "Наложение",
+  "Difference": "Разница",
+  "Blink": "Мигание",
+};
+
+/** Подпись режима по языку интерфейса; неизвестное значение — как есть. */
+function modeLabel(value) {
+  const v = value === undefined || value === null ? "" : String(value);
+  if (!isRu()) return v;
+  return MODE_LABELS_RU[v] || v;
+}
 
 const HELP = [
   {
     name: "mode",
-    label: "Mode / Режим сравнения",
+    label: "Mode",
+    icon: "↔️",
+    lines: [
+      "Off: clean Image 1 viewer — single size centred (default)",
+      "Slider: interactive slider (follows the cursor)",
+      "Side-by-Side: two frames side by side (views: Pair/1/2 — buttons in the footer)",
+      "Overlap: overlay with opacity",
+      "Difference: highlight differences",
+      "Blink: alternating frame swap",
+    ],
+  },
+  {
+    name: "opacity",
+    label: "Opacity",
+    icon: "🎨",
+    lines: ["Image 1 opacity in Overlap mode (0 — transparent, 1 — solid)"],
+  },
+  {
+    name: "blink_speed",
+    label: "Blink Speed",
+    icon: "⏱️",
+    lines: ["Frame switching phase duration (1.0 — 3.0 sec)"],
+  },
+  {
+    name: "zoom_help",
+    label: "Zoom & Pan",
+    icon: "🔍",
+    lines: [
+      "Alt + Wheel: zoom 1.0x — 10.0x",
+      "Middle Click + Drag: pan the frame",
+      "Double Click: reset zoom and position",
+      "Navigation (Alt+Wheel, middle button) — only in Side-by-Side with both frames visible",
+    ],
+  },
+];
+
+// RU-версия справки — показывается только при русском интерфейсе ComfyUI.
+const HELP_RU = [
+  {
+    name: "mode",
+    label: "Режим сравнения",
     icon: "↔️",
     lines: [
       "Off: чистый просмотрщик Image 1 — один размер по центру (по умолчанию)",
@@ -147,19 +270,19 @@ const HELP = [
   },
   {
     name: "opacity",
-    label: "Opacity / Прозрачность",
+    label: "Прозрачность",
     icon: "🎨",
     lines: ["Непрозрачность Image 1 в режиме Overlap (0 — прозрачно, 1 — плотно)"],
   },
   {
     name: "blink_speed",
-    label: "Blink Speed / Скорость мигания",
+    label: "Скорость мигания",
     icon: "⏱️",
     lines: ["Длительность фазы переключения кадров (1.0 — 3.0 сек)"],
   },
   {
     name: "zoom_help",
-    label: "Zoom & Pan / Навигация",
+    label: "Навигация",
     icon: "🔍",
     lines: [
       "Alt + Wheel: зум 1.0x — 10.0x",
@@ -169,6 +292,16 @@ const HELP = [
     ],
   },
 ];
+
+/** Справка по языку интерфейса. */
+function helpItems() { return isRu() ? HELP_RU : HELP; }
+
+/** Подсказка пустого превью по языку интерфейса. */
+function hintText() {
+  return isRu()
+    ? "Подключите изображения и запустите схему..."
+    : "Connect images and run the graph...";
+}
 
 // ── мелкие хелперы ────────────────────────────────────────────────────────
 
@@ -414,7 +547,7 @@ function restoreImages(node) {
 
 function updateOpenButton(node) {
   const btn = getWidget(node, OPEN_BTN);
-  if (btn) btn.label = node._dscOpenPath ? OPEN_LABEL_READY : OPEN_LABEL_EMPTY;
+  if (btn) btn.label = node._dscOpenPath ? openLabelReady() : openLabelEmpty();
 }
 
 function openImage1(node) {
@@ -426,8 +559,10 @@ function openImage1(node) {
   if (!path) return;
   postJson(OPEN_URI, { path })
     .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
-    .then(({ ok, j }) => flashLabel(btn, ok && j.success ? "✅ Открыто" : `⚠️ ${j.error || "ошибка"}`, OPEN_LABEL_READY, 2200))
-    .catch((e) => flashLabel(btn, `⚠️ ${e && e.message ? e.message : e}`, OPEN_LABEL_READY, 2200));
+    .then(({ ok, j }) => flashLabel(btn, ok && j.success
+      ? (isRu() ? "✅ Открыто" : "✅ Opened")
+      : `⚠️ ${j.error || (isRu() ? "ошибка" : "error")}`, openLabelReady(), 2200))
+    .catch((e) => flashLabel(btn, `⚠️ ${e && e.message ? e.message : e}`, openLabelReady(), 2200));
 }
 
 // ── Save/Preview ──────────────────────────────────────────────────────────
@@ -859,7 +994,7 @@ function hideHelp(node) {
 }
 
 function buildHelpContent(doc, box) {
-  for (const item of HELP) {
+  for (const item of helpItems()) {
     const title = el(doc, "div", { fontWeight: "bold", color: "#fff", marginTop: "6px" },
       `${item.icon || "💡"} ${item.label}`);
     box.appendChild(title);
@@ -1011,7 +1146,7 @@ function buildPreviewDom(node) {
     pointerEvents: "auto",
   });
   viewSel.id = DOM_VIEW;
-  for (const item of VIEW_ITEMS) {
+  for (const item of viewItems()) {
     const dot = el(doc, "div", {
       width: "16px",
       height: "16px",
@@ -1049,7 +1184,7 @@ function buildPreviewDom(node) {
     position: "absolute", left: "0", right: "0", top: "50%",
     textAlign: "center", fontSize: "12px", color: "#666666",
     pointerEvents: "none",
-  }, "Подключите изображения и запустите схему...");
+  }, hintText());
   const badge = el(doc, "div", {
     position: "absolute", right: "8px", bottom: (DIM_BAR_H + 6) + "px", display: "none",
     fontSize: "10px", fontWeight: "bold", color: "#ffffff",
@@ -1416,7 +1551,7 @@ function addButtons(node) {
   if (!getWidget(node, OPEN_BTN)) {
     const openBtn = node.addWidget("button", OPEN_BTN, null, () => openImage1(node), { serialize: false });
     openBtn.serialize = false;
-    openBtn.label = node._dscOpenPath ? OPEN_LABEL_READY : OPEN_LABEL_EMPTY;
+    openBtn.label = node._dscOpenPath ? openLabelReady() : openLabelEmpty();
     // Сразу под ячейкой префикса, выше блока OreX-функционала.
     insertWidgetAfter(node, openBtn, W_PREFIX);
   }
@@ -1428,8 +1563,13 @@ function hookModeWidgets(node) {
     const w = getWidget(node, name);
     if (!w || w._dscHooked) continue;
     w._dscHooked = true;
-    // П.6: слайдеры без цветной заливки — нейтральный серый (как стандартные).
-    if (name !== "mode" && w.options) {
+    if (name === "mode") {
+      // Подписи combo — через getOptionLabel (values НЕ трогаем). Функция
+      // вызывается в момент отрисовки, поэтому смена языка подхватывается живой.
+      w.options = w.options || {};
+      w.options.getOptionLabel = (v) => modeLabel(v);
+    } else if (w.options) {
+      // П.6: слайдеры без цветной заливки — нейтральный серый (как стандартные).
       w.options.slider_color = "#666";
     }
     const orig = w.callback;
@@ -1606,8 +1746,22 @@ if (typeof window !== "undefined") {
     DIM_BAR_H: DIM_BAR_H,
     OPEN_LABEL_READY: OPEN_LABEL_READY,
     OPEN_LABEL_EMPTY: OPEN_LABEL_EMPTY,
+    OPEN_LABEL_READY_RU: OPEN_LABEL_READY_RU,
+    OPEN_LABEL_EMPTY_RU: OPEN_LABEL_EMPTY_RU,
     OPEN_URI: OPEN_URI,
     HELP: HELP,
+    HELP_RU: HELP_RU,
+    VIEW_TITLES_RU: VIEW_TITLES_RU,
+    MODE_LABELS_RU: MODE_LABELS_RU,
+    modeLabel: modeLabel,
+    readComfyLocale: readComfyLocale,
+    isRu: isRu,
+    setLocaleOverride: setLocaleOverride,
+    viewItems: viewItems,
+    helpItems: helpItems,
+    openLabelReady: openLabelReady,
+    openLabelEmpty: openLabelEmpty,
+    hintText: hintText,
     num: num,
     getWidget: getWidget,
     getValue: getValue,

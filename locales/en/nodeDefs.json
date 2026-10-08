@@ -1,0 +1,41 @@
+{
+  "Degg_Images_Save_Compare": {
+    "display_name": "Degg Images Save/Compare",
+    "description": "Save/Preview the main image and compare it interactively with a second one (Slider / Side-by-Side / Overlap / Difference / Blink).",
+    "inputs": {
+      "image_1": {
+        "name": "Image 1",
+        "tooltip": "Main image: saved/previewed and passed to the output."
+      },
+      "save_mode": {
+        "name": "Save mode",
+        "tooltip": "Save — into output with the prefix; Preview — into the temp folder."
+      },
+      "filename_prefix": {
+        "name": "Filename prefix",
+        "tooltip": "Image 1 filename prefix (Save mode only)."
+      },
+      "mode": {
+        "name": "Mode",
+        "tooltip": "Image 1 / Image 2 comparison mode (Off — Image 1 viewer, default)."
+      },
+      "opacity": {
+        "name": "Opacity",
+        "tooltip": "Image 1 opacity in Overlap mode."
+      },
+      "blink_speed": {
+        "name": "Blink speed",
+        "tooltip": "Blink phase duration in Blink mode, sec."
+      },
+      "image_2": {
+        "name": "Image 2",
+        "tooltip": "Image to compare with (view only)."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Image 1"
+      }
+    }
+  }
+}
