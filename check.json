@@ -1,0 +1,22 @@
+{
+  "checks": [
+    {
+      "label": "логика ноды (Python, реальный torch)",
+      "cmd": "python tests/_test_degg_images_save_compare.py",
+      "expect": ["FAIL: 0", "ТЕСТ ПРОЙДЕН"],
+      "description": "INPUT_TYPES (порядок виджетов, image_1 обязателен, image_2 опционален, MODES с Off первым и default Off), Save/Preview, батч Image 1, первый кадр Image 2, метаданные PNG, UI-контракт без ключа images"
+    },
+    {
+      "label": "JS-смоук (заглушки window/comfyAPI/document)",
+      "cmd": "node tests/_smoke_degg_images_save_compare.mjs",
+      "expect": ["SMOKE OK"],
+      "description": "контракт DOM-виджета превью (addDOMWidget, пол высоты getMinHeight без getHeight/computeSize, height:100%), DOM-структура слоёв, 6 режимов на DOM/CSS с Off-просмотрщиком первым и по умолчанию (Difference — blend на коробке слоя), Off: один размер (Image 1) по центру футера и подпись Image 2 скрыта, селектор вида dsc-view (3 кнопки: Пара с иконкой двух прямоугольников / Image 1 / Image 2, 16px, старое значение grid → fallback split, нет dsc-view-grid, HELP без Шторка/Сетка) показан только в Side-by-Side, линия шторки 1px серая #808080 без dsc-knob/сегментов, подписи кнопок ровно Open in Viewer / No image и Сохранить текущий вид без эмодзи-иконок, колесо без Alt и Alt+wheel при закрытом гейте форвардится синтетическим WheelEvent на app.canvas.canvas (forwardWheelToCanvas, без zoom и без altKey в синтетике), навигация (Alt+wheel/средняя кнопка) только в Side-by-Side с видимой парой (navEnabled: alt-гейт зума в stage wheel + bare-гейты в остальных обработчиках) с Off/Slider/solo-gate тестами, в SBS зум двигает обе сцены одним scale, фон превью и футера transparent (серый фон ноды вместо #18181c), слайдеры opacity/blink_speed с slider_color #666, SBS-панорама (panX/panY в DOM-трансформе обеих половин и канвасе, reset при сбросе зума), capture-guard на предке [data-node-id] в Nodes 2.0, захват «как видишь» по виду (Off/Slider-шторка/SBS-виды), подписи размеров в футере вне изображения (белый/серый), автовыбор ориентации Side-by-Side (ландшафт сверху/снизу, портрет слева/справа), шторка за курсором, зум/панорама на событиях элемента, битая картинка не роняет отрисовку, подсказка гасится по mouseleave, восстановление картинок из node.properties при смене воркфлоу"
+    },
+    {
+      "label": "статический аудит",
+      "cmd": "node tests/_audit_degg_images_save_compare.mjs",
+      "expect": ["аудит чист"],
+      "description": "согласованность Python/JS (имена виджетов, роуты, ui-ключи, слоты), запрещённые приёмы (timers, MutationObserver, scrollHeight/offsetHeight, перезапись computeSize/onMouseMove, глобальные слушатели, canvasOnly, z-index рядом с mix-blend-mode, blend на <img> вместо коробки), 6 режимов: порядок MODES с Off первым (Python и JS), default Off, подпапка off, жёлтый #FFEE00 удалён, dsc-knob удалён, линия 1px серая #808080, селектор вида: 3 пункта (Пара — квадрат 16px с иконкой двух child-узлов, Image 1/Image 2 — круги), dsc-view-grid удалён, fallback grid → split, подписи без эмодзи (Open in Viewer / No image / Сохранить текущий вид), forwardWheelToCanvas на app.canvas.canvas синтетическим WheelEvent без altKey, navEnabled (3 bare-гейта + alt-гейт зума в stage wheel), тёмное поле #18181c заменено background transparent, hookModeWidgets ставит slider_color #666, Off-dim по центру (dim1 textAlign center, dim2 display none), селектор вида в режиме Side-by-Side, SBS-панорама в DOM и канвасе, capture-guard (canvasGuardEl/wheel-capture), Difference на коробке слоя, футер подписей и цвета, автовыбор ориентации SBS, guard isDrawable перед drawImage, состав tests/ и check.json"
+    }
+  ]
+}
