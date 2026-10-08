@@ -1,4 +1,4 @@
-# Память сессии — Degg_Images_Save_Compare (2026-10-08)
+# Память сессии — Degg_Images_Save_Compare (2026-10-09)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -6,58 +6,91 @@
 ---
 
 ## 1. Что делали в этой сессии (кратко)
-- Выполнена 5-пунктовая правка JS (п.2 отменён пользователем): (1) форвард колеса
-  без Alt/при закрытом гейте на `app.canvas.canvas`; (3) SBS-селектор вида:
-  два кружка Шторка/Сетка → 3 кнопки (Пара с иконкой / Image 1 / Image 2);
-  (4) тест «alt+wheel в паре зумит обе сцены»; (5) `background: transparent`
-  в root/footer превью; (6) `slider_color: #666` для `opacity`/`blink_speed`.
-- Процесс red-first (§2.3): красная база ДО правок — smoke 199/16, audit 182/9;
-  после — smoke 215/0, audit 191/0, python 60/0.
-- Мутационное тестирование: 11 мутаций (M1–M11) — все RED(OK), восстановление зелёное.
-- Обновлены `SPECIFICATION.md` (§4.3 события, селектор вида, таблица отличий)
-  и `check.json` (обоих description под новые факты; expect не тронуты).
-- Создан git-репозиторий: `https://github.com/vycheslav-iv/Degg_Images_Save_Compare`
-  (commit `1b30ec9`, 9 файлов, master → origin). Строка добавлена в AGENTS.md §6.1.
-- Синхронизация `python sync.py Degg_Images_Save_Compare` выполнена (4 файла,
-  `__pycache__` очищен); `check.py` и `check.bat` — зелёные (провалов 0).
+
+- **Локализация ноды**: русский интерфейс ComfyUI → RU, любой другой → EN.
+  Предыдущая модель сломала ноду (превью перестало появляться) — выполнен откат
+  рабочей копии из чистого исходника, затем переписано правильно.
+- **Найден настоящий баг прошлой попытки**: подмена `w.options.values`
+  русскими строками → `currentMode()` всегда возвращал `"Off"` → ветки
+  Slider/Overlap/Difference/Blink молча не работали (Python дополнительно
+  приводил значение к `"Slider"` — traceback отсутствовал).
+- **Подписи режимов** переведены через `widget.options.getOptionLabel`
+  (значения и `w.value` не тронуты).
+- Обновлена `SPECIFICATION.md` (новая §5 «Локализация», §5.1/5.2/5.3;
+  прежние §5–§7 → §6–§8), описания в `check.json` (expect не тронуты).
+- Red-first: аудит 180/12 → 239/0, смоук 229/7 → 241/0; подзадача режимов —
+  красная база 235/4 (аудит) и 238/3 (смоук). Мутации M1–M6 — все RED.
+- Вне репозитория (корень бандла — не git): созданы/дописаны скилы
+  `comfyui-combo-protocol-values` (новый), `comfyui-localization`,
+  `comfyui-bilingual-node` + строка в `AGENTS.md` §3/§5.
 
 ## 2. Итоговое состояние кода
-- `web/js/degg_images_save_compare.js` (CRLF, версия `2.14.0-wheel-fwd-viewpair`):
-  - `VIEW_ITEMS` — 3 пункта `{id:"dsc-view-split", pair:true}` + img1/img2 (js:119);
-  - сборка кнопок вида: `borderRadius: item.pair ? "3px" : "50%"` + иконка из
-    2 child-узлов 5×10, фолбэк — пустой квадрат (js:983–1028);
-  - `forwardWheelToCanvas(e)` — синтетический WheelEvent на `app.canvas.canvas`
-    без `altKey`, c preventDefault/stopPropagation (js:1094, вызов js:1142);
-  - stage wheel: `if (e.altKey && navEnabled(node))` зум, иначе форвард (js:1132);
-  - root/footer `background: "transparent"`; захват канваса `fillStyle="#18181c"` — НЕ трогать;
-  - `hookModeWidgets`: `w.options.slider_color = "#666"` (js:1663–1670).
-- Тесты: `tests/_smoke_degg_images_save_compare.mjs` — 215 ok / 0 FAIL;
-  `tests/_audit_...` — 191/0; `tests/_test_...py` — 60/0.
-- Мутационный драйвер: `C:\Users\dggio\AppData\Local\Temp\opencode\dsc_mutations.py`
-  (M1–M11, бэкап JS рядом в temp).
+
+- `web/js/degg_images_save_compare.js` (`DSC_JS_VERSION` js:51 — не менялся):
+  - `readComfyLocale()` js:99 — `app.extensionManager.setting.get("Comfy.Locale")`
+    → фолбэк `app.ui.settings.getSettingValue` → `navigator.language`;
+  - `isRu()` js:123 (`/^ru/i`), `setLocaleOverride(v)` js:128 — тестовый вход;
+  - `MODES` js:193 и `currentMode()` js:401 — **протокол, не трогать**;
+  - `MODE_LABELS_RU` js:201, `modeLabel()` js:211 — RU-подписи
+    (Выкл./Шторка/Сбоку/Наложение/Разница/Мигание);
+  - `hookModeWidgets` js:1561 → `w.options.getOptionLabel = (v) => modeLabel(v)`
+    js:1570 (только для `mode`; слайдерам — `options.slider_color = "#666"`).
+  - RU-строки превью: `VIEW_TITLES_RU` js:174, `viewItems()` js:177,
+    `openLabelReady/Empty` js:190, `helpItems()` js:297, `hintText()` js:300;
+    EN-константы исходно английские.
+- `degg_images_save_compare.py` — все `tooltip` и `DESCRIPTION` **по-английски**
+  (EN-источник; для локали без файла фронтенд отдаёт backend-текст).
+- `locales/en/nodeDefs.json` и `locales/ru/nodeDefs.json` — по 41 строке:
+  `display_name`, `description`, `inputs.*.name|tooltip` (7 слотов),
+  `outputs.0.name`.
+- Тесты: python **57/0**, smoke **241/0**, audit **239/0**; `check.py` — провалов 0.
 
 ## 3. Проблемы, которые встречались (и как решали)
-- Событие колеса от legacy DomWidget не доходит до канвы (она — сосед в DOM) —
-  решено форвардом `forwardWheelToCanvas` (аналог Vue `forwardEventToCanvas`).
-- Синтетика БЕЗ `altKey`, иначе граф зумится повторно; на оригинале — preventDefault/stopPropagation.
-- Мутация M3 показала: `altKey` в opts ломает ровно одну audit-проверку — так и должно.
+
+- Превью не появлялось, ошибок нет → подмена протокольных значений combo.
+  Правильно — только `getOptionLabel`; оба фронтенда его читают
+  (legacy `ComboWidget.ts:149`, Nodes 2.0 `useWidgetSelectItems` →
+  `WidgetSelectDropdown.vue:88`).
+- Ретрай-регистрация (`setTimeout(...,100)` до появления `comfyAPI.app.app`) —
+  **мёртвый код**: пространство заполняется до импорта расширения
+  (`setup()` → `loadExtensions()` → `import(ext)`); вдобавок рекурсия без
+  границы — утечка таймера.
+- Детектор аудита ловил проверку на **строке-комментарии** (слепой) → все
+  детекторы локализации ищутся в `JSC` (код без комментариев).
+- `git diff` по аудиту показывал 865 строк вместо 91 → в файле был `\r\r\n`
+  (смешанные окончания). Вычищено до LF, staged diff стал 91/0. Если увидишь
+  полную перезапись файла в diff — сначала смотри на окончания строк.
 
 ## 4. Что важно не сломать при продолжении работы
+
+- ⛔ **Никогда** не подменять `widget.options.values`, `widget.value` и
+  значения `INPUT_TYPES` — только `getOptionLabel` (скил
+  `comfyui-combo-protocol-values`).
+- Python остаётся EN-источником; русский — только в `locales/ru`.
+- После правок `locales/` — **перезапуск ComfyUI** (`@lru_cache` + скан на
+  старте) и Hard Reload; после правок `web/js/` — только Hard Reload.
 - Запрещено в JS: `zIndex`, `scrollHeight|offsetHeight`, `getHeight:`,
-  `setInterval`, глобальные слушатели; сохранить 3 API-роута, `mixBlendMode:"difference"`
-  на `st.dom.b.box`, help-кнопку `rgba(24,24,28,0.75)`, `fillStyle="#18181c"` канваса.
-- `check.json`: ровно 3 проверки; expect-строки не менять.
-- Python `degg_images_save_compare.py` в этой сессии НЕ менялся (60/0).
-- Перед правками sizing/layout — читать исходники фронтенда (скил `comfyui-frontend-sources`).
+  `setInterval`, глобальные слушатели; сохранить `fillStyle="#18181c"` захвата
+  канваса, `mixBlendMode:"difference"` на `st.dom.b.box`, help-кнопку
+  `rgba(24,24,28,0.75)`, `dim2 display none` в Off.
+- `check.json`: ровно 3 проверки, **expect-строки не менять**.
+- `sync.py` не копирует `tests/` — тесты живут только в исходнике.
 
 ## 5. Следующие шаги (идеи, не сделано)
-- Перезапуск ComfyUI + Hard Reload пользователем (JS синхронизирован, но не подтверждён живьём).
-- Скил-предложение (ждёт «да»): вынести паттерн «forward wheel с legacy DomWidget
-  на канву графа» — дополнить `comfyui-js-extension` или новый скил.
-- Живые пробы `_probe_live_*` не писались (headless-покрытия хватило).
+
+- **Живая проверка**: перезапуск ComfyUI + Hard Reload → в дропдауне режимов
+  русские подписи, и все 6 режимов реально работают под RU. Проверено только
+  на исходниках фронтенда и в vm-стенде, не в браузере.
+- Детектор на голый `setTimeout` в аудите (ждёт «да» пользователя).
+- Скилы и `AGENTS.md` лежат **вне git** (корень бандла не репозиторий,
+  `git init` запрещён) — не коммитятся, не восстанавливаются.
+- `[warn] предохранитель git` в `check.py` — предсуществующий.
 
 ## 6. Связанные файлы
+
 - `F:\AI_projects\Custom_node_ComfyUI\Degg_Images_Save_Compare\` — исходник (`.git` здесь)
 - `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Degg_Images_Save_Compare\` — рабочая копия
-- `SPECIFICATION.md`, `check.json` — обновлены под эту сессию
-- `C:\Users\dggio\AppData\Local\Temp\opencode\dsc_mutations.py` — мутатор (temp)
+- `SPECIFICATION.md` (§5 — локализация), `check.json` — обновлены под эту сессию
+- `SESSION_MEMORY-history/2026-10-09.md` — снапшот предыдущей памяти
+- Скилы (вне репозитория): `.agents/skills/comfyui-combo-protocol-values/`,
+  `comfyui-localization/`, `comfyui-bilingual-node/` (+ зеркала в `.kilo`, `.opencode`)
