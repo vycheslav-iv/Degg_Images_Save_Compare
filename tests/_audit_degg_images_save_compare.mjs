@@ -19,7 +19,10 @@ const check = (label, cond, extra = "") => {
 const has = (s, re, label) => check(label, re.test(s), String(re));
 const read = (rel) => {
   const p = path.join(ROOT, rel);
-  return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null;
+  if (!fs.existsSync(p)) return null;
+  // CRLF-нормализация: regex-и чеков пишутся с \n и не должны зависеть
+  // от переводов строк (на CRLF-файле аудит иначе падает ложно — красный прогон 167/10).
+  return fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 };
 // Запрещённые приёмы ищем ТОЛЬКО в коде: в комментариях они упоминаются
 // именно как запрещённые, и детектор по сырому тексту давал бы ложный FAIL.
@@ -80,8 +83,6 @@ if (PY) {
   check("python: ui НЕ отдаёт ключ images (дубль превью)",
     !/"ui":\s*\{[^}]*"images"/.test(PY));
 
-  has(PY, /BLINK_PHASE_MS\s*=\s*1500/, "python: BLINK_PHASE_MS = 1500");
-  has(PY, /"Blink":\s*"blink"/, "python: карта режимов содержит Blink");
   has(PY, /def open_file_in_viewer/, "python: open_file_in_viewer()");
   has(PY, /os\.startfile/, "python: открытие файла через os.startfile (Windows)");
 
@@ -109,7 +110,6 @@ if (PY) {
   check("python: режим по умолчанию — Off",
     /"mode":\s*\(MODES,\s*\{[\s\S]{0,160}?"default":\s*"Off"/.test(PY),
     "default mode");
-  check("python: подпапка режима Off (\"off\")", PY.includes('"off"'));
   check("python: save_mode default True, подписи Save/Preview",
     /"save_mode"[\s\S]{0,160}?"default":\s*True/.test(PY) &&
     /"label_on":\s*"Save"/.test(PY) && /"label_off":\s*"Preview"/.test(PY));
@@ -126,6 +126,8 @@ if (JS) {
   check("js: нет старого импорта scripts/app.js", !/scripts\/app\.js/.test(JSC));
   check("js: нет top-level import", !/^import\s/m.test(JSC));
   check("js: нет top-level await", !/^await\s/m.test(JSC));
+  check("js: нет мёртвой ветки fp.el (фронтенд: widget.el/.el.style — 0 вхождений)", !/fp\.el/.test(JSC));
+check("js: help-box рамка монохромная (нет sky-акцента 56,189,248)", !/56,\s*189,\s*248/.test(JSC));
 
   has(JS, /const EXT_NAME\s*=\s*"Degg_Images_Save_Compare"/, "js: EXT_NAME");
   has(JS, /const NODE_NAME\s*=\s*"Degg_Images_Save_Compare"/, "js: NODE_NAME");
@@ -186,11 +188,8 @@ if (JS) {
     "js: кнопка открытия — «Open in Viewer» (как в Image Save/Preview)");
   has(JS, /OPEN_LABEL_EMPTY = "No image"/,
     "js: пустая подпись — «No image» (как в Image Save/Preview)");
-  has(JS, /SAVE_LABEL = "Сохранить текущий вид"/,
-    "js: подпись сохранения без иконки 💾 (по задаче)");
   check("js: в подписях кнопок нет эмодзи-иконок (📷/💾)",
-    !/OPEN_LABEL_(READY|EMPTY) = "[^"]*[📷💾🖼]/.test(JS) &&
-    !/SAVE_LABEL = "[^"]*[📷💾🖼]/.test(JS));
+    !/OPEN_LABEL_(READY|EMPTY) = "[^"]*[📷💾🖼]/.test(JS));
   has(JS, /DOM_FOOTER\s*=\s*"dsc-footer"/, "js: футер подписей размеров dsc-footer");
   has(JS, /color:\s*"#ffffff"/, "js: подпись Image 1 — белая");
   has(JS, /color:\s*"#999999"/, "js: подпись Image 2 — серая");
@@ -199,7 +198,6 @@ if (JS) {
   has(JS, /function sbsOrientation/, "js: автовыбор ориентации Side-by-Side");
   has(JS, /iw > ih \? "v" : "h"/, "js: ландшафт → сверху/снизу, портрет → слева/справа");
   has(JS, /\(tx \+ st\.panX\)/, "js: SBS-трансформ учитывает панораму (panX/panY)");
-  has(JS, /\+ st\.panX;/, "js: SBS-канвас учитывает панораму (dX/dY)");
 
   // Режим Off — просмотрщик Image 1 без сравнения; по умолчанию (первый в MODES).
   has(JS, /"Off",\s*"Slider",\s*"Side-by-Side",\s*"Overlap",\s*"Difference",\s*"Blink"\]/,
@@ -284,8 +282,6 @@ if (JS) {
   has(JS, /num\(img\.naturalWidth, 0\) > 0/, "js: isDrawable проверяет naturalWidth > 0");
   check("js: drawImage никогда не получает сырой st.img1/st.img2",
     !/drawImage\(\s*st\.img/.test(JSC));
-  has(JS, /const ok1 = isDrawable\(img1\) \? img1 : null/, "js: drawComposite отсеивает неготовые картинки");
-  has(JS, /if \(!isDrawable\(box\.img\)\) continue/, "js: Side-by-Side отсеивает неготовые картинки");
 
   // Жизненный цикл
   has(JS, /proto\.onNodeCreated\s*=/, "js: перехват onNodeCreated");
@@ -311,8 +307,6 @@ if (JS) {
   for (const m of ["Slider", "Side-by-Side", "Overlap", "Difference", "Blink", "Off"]) {
     has(JS, new RegExp(`"${m.replace("-", "\\-")}"`), `js: режим ${m}`);
   }
-  has(JS, /function captureComposite/, "js: captureComposite (сохранение «как видишь»)");
-  has(JS, /toDataURL\("image\/jpeg",\s*0\.8\)/, "js: снимок в JPEG 0.80");
 }
 
 // ── 4. Кросс-проверка Python ↔ JS ─────────────────────────────────────────
@@ -321,8 +315,8 @@ if (PY && JS) {
   const jsRoutes = [...JS.matchAll(/"(\/degg_images_save_compare\/[a-z_]+)"/g)].map((m) => m[1]);
   const uniqPy = [...new Set(pyRoutes)].sort();
   const uniqJs = [...new Set(jsRoutes)].sort();
-  check("роуты JS === роуты Python (open_file/save_compare/save_blink_gif)",
-    JSON.stringify(uniqPy) === JSON.stringify(uniqJs) && uniqPy.length === 3,
+  check("роуты JS === роуты Python (open_file)",
+    JSON.stringify(uniqPy) === JSON.stringify(uniqJs) && uniqPy.length === 1,
     `py=${JSON.stringify(uniqPy)} js=${JSON.stringify(uniqJs)}`);
 
   check("js: читает ui.degg_compare_images (как отдаёт python)",
@@ -340,11 +334,6 @@ if (PY && JS) {
     /Image 1/.test(JS) && /Image 2/.test(JS));
   check("js ↔ python: слоты 1 и 2 совпадают",
     /slot === 1 \?/.test(JSC) && PY.includes('["slot"] = 1') && PY.includes('["slot"] = 2'));
-
-  const pyModes = ["slider", "sidebyside", "overlap", "difference", "blink", "off"];
-  for (const m of pyModes) {
-    check(`python: подпапка режима "${m}"`, PY.includes(`"${m}"`));
-  }
 }
 
 // ── 5. tests/ ─────────────────────────────────────────────────────────────

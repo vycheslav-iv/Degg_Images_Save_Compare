@@ -180,6 +180,10 @@ check("класс: OUTPUT_NODE = True", node.DeggImagesSaveCompare.OUTPUT_NODE i
 check("класс: CATEGORY", node.DeggImagesSaveCompare.CATEGORY == "My_custom_nodes/Image")
 check("маппинг класса", node.NODE_CLASS_MAPPINGS.get(NODE_KEY) is node.DeggImagesSaveCompare)
 check("маппинг имени", NODE_KEY in node.NODE_DISPLAY_NAME_MAPPINGS)
+# Задача 2 (красная): отображаемое имя ноды в меню ComfyUI.
+check("T2: отображаемое имя «Degg Images Save/Compare»",
+      node.NODE_DISPLAY_NAME_MAPPINGS.get(NODE_KEY) == "Degg Images Save/Compare",
+      str(node.NODE_DISPLAY_NAME_MAPPINGS))
 check("WEB_DIRECTORY = web", node.WEB_DIRECTORY == "web")
 check("JS-файл существует", (ROOT / "web" / "js" / "degg_images_save_compare.js").is_file())
 
@@ -187,21 +191,6 @@ check("JS-файл существует", (ROOT / "web" / "js" / "degg_images_sa
 sfx = node.random_suffix()
 check("random_suffix: 5 символов из алфавита",
       len(sfx) == 5 and all(c in node.ALPHABET for c in sfx))
-check("today_folder формат YYYY-MM-DD",
-      len(node.today_folder()) == 10 and node.today_folder()[4] == "-" and node.today_folder()[7] == "-")
-
-mode_dir = node.ensure_mode_dir("slider")
-check("ensure_mode_dir: output/<дата>/slider", Path(mode_dir).is_dir()
-      and Path(mode_dir).parts[-1] == "slider"
-      and Path(mode_dir).parts[-2] == node.today_folder())
-check("next_counter: с 1 на пустой папке", node.next_counter(mode_dir, "slider", "jpg") == 1)
-(Path(mode_dir) / "Degg_Compare_slider_00007.jpg").write_bytes(b"x")
-check("next_counter: max+1 по существующим файлам", node.next_counter(mode_dir, "slider", "jpg") == 8)
-
-check("resolve_source_path: temp",
-      node.resolve_source_path("a.png", "sub", "temp") == os.path.join(str(TEMP_DIR), "sub", "a.png"))
-check("resolve_source_path: output без subfolder",
-      node.resolve_source_path("a.png", "", "output") == os.path.join(str(OUT_DIR), "a.png"))
 
 try:
     node.open_file_in_viewer(str(TMP / "nope.png"))
@@ -282,9 +271,15 @@ with Image.open(ui_list(res_nm)[0]["full_path"]) as im:
     check("--disable-metadata: промпт в PNG не пишется", not (im.text or {}).get("prompt"))
 
 # ── 11. регистрация роутов (заглушка server вместо ComfyUI) ───────────────
-# Проверяем САМ механизм: with реальным aiohttp и поддельным PromptServer
-# register_routes() обязан повесить ровно 3 async-обработчика с теми путями,
-# которые дёргает JS (иначе кнопки молча не работают — 404 без ошибки в UI).
+# Задача 1 (красная): роуты сохранения удалены вместе с кнопкой.
+check("T1: python-роут save_compare удалён",
+      "/degg_images_save_compare/save_compare" not in SRC)
+check("T1: python-роут save_blink_gif удалён",
+      "/degg_images_save_compare/save_blink_gif" not in SRC)
+
+# Проверяем САМ механизм: с реальным aiohttp и поддельным PromptServer
+# register_routes() обязан повесить ровно 1 async-обработчик (open_file),
+# который дёргает JS (иначе кнопка молча не работает — 404 без ошибки в UI).
 try:
     import aiohttp  # noqa: F401
     _has_aiohttp = True
@@ -312,10 +307,8 @@ if _has_aiohttp:
 
     expected_routes = sorted([
         "/degg_images_save_compare/open_file",
-        "/degg_images_save_compare/save_compare",
-        "/degg_images_save_compare/save_blink_gif",
     ])
-    check("register_routes: 3 роута с ожидаемыми путями",
+    check("register_routes: 1 роут (open_file)",
           sorted(handlers) == expected_routes, str(sorted(handlers)))
     import asyncio
     check("register_routes: все обработчики — async def",

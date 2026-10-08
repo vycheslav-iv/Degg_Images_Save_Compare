@@ -2,7 +2,7 @@
 // с Image 2 (перенос функционала ↔️ OreX Image Compare).
 //
 // Порядок сверху вниз: [save_mode] [filename_prefix] [Открыть Image 1]
-//                      [mode] [opacity] [blink_speed] [Сохранить текущий вид]
+//                      [mode] [opacity] [blink_speed]
 //                      [превью сравнения]
 //
 // ── Почему превью — DOM-виджет, а не canvas-виджет ────────────────────────
@@ -97,11 +97,12 @@ const SBS_GAP = 2;          // зазор между половинами в Sid
 const PREVIEW_MARGIN = 10;
 // Футер подписей размеров: занимает высоту снизу вне области изображения —
 // подписи лежат на сером поле, а не поверх кадра (как в стандартной ноде).
-const DIM_BAR_H = 18;
+// Задача 4: 26px, чтобы кнопки вида (16px) в центре футера отступали от
+// изображения на (26-16)/2 = 5px, а не на 1px (при 18px налезали вплотную).
+const DIM_BAR_H = 26;
 
 const PREVIEW_WIDGET = "degg_compare_preview";
 const OPEN_BTN = "open_image_1";
-const SAVE_BTN = "save_current_view";
 const W_SAVE = "save_mode";
 const W_PREFIX = "filename_prefix";
 
@@ -124,12 +125,9 @@ const VIEW_ITEMS = [
 const VIEW_VALUES = ["split", "img1", "img2"];
 
 const OPEN_URI = "/degg_images_save_compare/open_file";
-const SAVE_URI = "/degg_images_save_compare/save_compare";
-const BLINK_URI = "/degg_images_save_compare/save_blink_gif";
 
 const OPEN_LABEL_READY = "Open in Viewer";
 const OPEN_LABEL_EMPTY = "No image";
-const SAVE_LABEL = "Сохранить текущий вид";
 
 const MODES = ["Off", "Slider", "Side-by-Side", "Overlap", "Difference", "Blink"];
 
@@ -168,15 +166,6 @@ const HELP = [
       "Middle Click + Drag: перемещение кадра",
       "Double Click: сброс зума и позиции",
       "Навигация (Alt+Wheel, средняя кнопка) — только в Side-by-Side, когда видны оба кадра",
-    ],
-  },
-  {
-    name: "save_btn",
-    label: "Сохранить текущий вид",
-    icon: "💾",
-    lines: [
-      "Сохраняет именно текущий режим и вид (положение шторки, зум, панораму)",
-      "в output/<дата>/<режим>/. Для Blink — GIF с плавным кроссфейдом.",
     ],
   },
 ];
@@ -265,7 +254,6 @@ function ensureState(node) {
       meta2: null,
       dim1: "",
       dim2: "",
-      sliderDrag: false,
       panDrag: false,
       lastPan: [0, 0],
       mode: "",
@@ -383,7 +371,10 @@ function refreshLabels(node) {
   if (!st.dom) return;
   st.dom.dim1.textContent = st.dim1 || "";
   st.dom.dim2.textContent = st.dim2 || "";
-  css(st.dom.hint, { display: st.img1 || st.img2 ? "none" : "block" });
+  // Заглушка «нет картинок»: в Off показывается только Image 1 (Image 2 в Off
+  // скрыта и не участвует), в остальных режимах — когда нечего сравнивать.
+  const shownImg = currentMode(node) === "Off" ? st.img1 : (st.img1 || st.img2);
+  css(st.dom.hint, { display: shownImg ? "none" : "block" });
   const label = st.zoom > 1.005 ? `${st.zoom.toFixed(1)}×` : "";
   st.dom.badge.textContent = label;
   css(st.dom.badge, { display: label ? "block" : "none" });
@@ -429,10 +420,10 @@ function updateOpenButton(node) {
 function openImage1(node) {
   const btn = getWidget(node, OPEN_BTN);
   const path = node._dscOpenPath || "";
-  if (!path) {
-    flashLabel(btn, OPEN_LABEL_EMPTY);
-    return;
-  }
+  // Пусто — подписывать нечего: кнопка уже показывает OPEN_LABEL_EMPTY
+  // (updateOpenButton ставит её по пути). Старый flashLabel(EMPTY) без
+  // restore затирал label через 2с (label = undefined).
+  if (!path) return;
   postJson(OPEN_URI, { path })
     .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
     .then(({ ok, j }) => flashLabel(btn, ok && j.success ? "✅ Открыто" : `⚠️ ${j.error || "ошибка"}`, OPEN_LABEL_READY, 2200))
@@ -442,8 +433,8 @@ function openImage1(node) {
 // ── Save/Preview ──────────────────────────────────────────────────────────
 
 /**
- * Гашение префикса в режиме Preview. `w.disabled` — единственное поле, которое
- * читает движок (проверено по BaseWidget/LGraphNode); `el.style.display` — DOM.
+ * Гашение префикса в режиме Preview. `w.disabled` + `options.disabled` —
+ * поля, которые читает движок (проверено по BaseWidget/LGraphNode).
  */
 function applySaveMode(node) {
   const fp = getWidget(node, W_PREFIX);
@@ -451,11 +442,6 @@ function applySaveMode(node) {
   const isSave = !!getValue(node, W_SAVE, true);
   fp.disabled = !isSave;
   if (fp.options) fp.options.disabled = !isSave;
-  try {
-    if (fp.el && fp.el.style) fp.el.style.display = isSave ? "" : "none";
-  } catch (e) {
-    /* ignore */
-  }
   if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
 }
 
@@ -658,12 +644,34 @@ function applyMode(node) {
   const st = ensureState(node);
   if (!st.dom) return;
   const mode = currentMode(node);
+  const prev = st.mode;
   st.mode = mode;
+
+  // Выход из Side-by-Side сбрасывает навигацию: вне SBS гейт navEnabled
+  // закрыт (Alt+wheel/панорама), а sharedTransform применяет zoom/pan во всех
+  // режимах — без сброса зум «залипает» в Slider/Off и не сбрасывается (вариант A).
+  if (prev === "Side-by-Side" && mode !== "Side-by-Side") {
+    st.zoom = 1;
+    st.panX = 0;
+    st.panY = 0;
+    st.sbsFocusU = 0.5;
+    st.sbsFocusV = 0.5;
+  }
+
+  // Задача 3: Off не сравнивает — гасим режимные слайдеры. Пишем и в
+  // w.disabled, и в w.options.disabled (паттерн applySaveMode): legacy-отрисовка
+  // читает widget.disabled, а Vue-компоненты Nodes 2.0 — options.disabled.
+  for (const nm of ["opacity", "blink_speed"]) {
+    const w = getWidget(node, nm);
+    if (!w) continue;
+    w.disabled = mode === "Off";
+    if (w.options) w.options.disabled = mode === "Off";
+  }
 
   // Сброс всего режимного. top/height сбрасываются тоже: иначе коробка,
   // расклеенная в вертикальной раскладке SBS, осталась бы половины высоты.
   for (const layer of [st.dom.a, st.dom.b]) {
-    css(layer.box, { clipPath: "", left: "0", top: "0", width: "100%", height: "100%", mixBlendMode: "" });
+    css(layer.box, { clipPath: "", left: "0", top: "0", width: "100%", height: "100%", mixBlendMode: "", display: "" });
     css(layer.img, { opacity: "", animation: "" });
   }
   css(st.dom.line, { display: "none" });
@@ -713,8 +721,13 @@ function applyMode(node) {
     setPaintOrder(node, st.dom.b, st.dom.a);
     css(st.dom.a.img, { animation: `${BLINK_KEYFRAMES} ${dur}s linear infinite` });
   } else if (mode === "Off") {
-    // Просмотрщик: Image 1 на весь кадр поверх Image 2, без клипа/линии/blend.
+    // Просмотрщик: Image 1 на весь кадр без клипа/линии/blend.
+    // Режим отключает сравнение — второе изображение не показывается вовсе
+    // (раньше слой Image 2 лежал под Image 1 и проглядывал в letterbox-полях).
+    // Скрытие по КОРОБКЕ, а не по <img>: setSlotImage/onload переставляет
+    // display у <img> и вернул бы картинку при догрузке в Off.
     setPaintOrder(node, st.dom.b, st.dom.a);
+    css(st.dom.b.box, { display: "none" });
   } else {
     // Режим Slider: всегда шторка — вид выбирается кружками только в SBS
     // (st.sliderView здесь игнорируется, по задаче).
@@ -777,8 +790,12 @@ function zoomAt(node, clientX, clientY, deltaY) {
   const st = ensureState(node);
   const rect = { x: 0, y: 0, w: previewSize(node).w, h: previewSize(node).h };
   const sr = stageRect(node);
-  const localX = num(clientX, 0) - sr.left;
-  const localY = num(clientY, 0) - sr.top;
+  // clientX/Y — экранные (getBoundingClientRect), rect — локальные
+  // (clientWidth): при зуме графа scale ≠ 1 приводим к локальным (баг T-COORD-B).
+  const rx = sr.width > 0 ? rect.w / sr.width : 1;
+  const ry = sr.height > 0 ? rect.h / sr.height : 1;
+  const localX = (num(clientX, 0) - sr.left) * rx;
+  const localY = (num(clientY, 0) - sr.top) * ry;
 
   const prevZoom = st.zoom;
   const factor = deltaY < 0 ? 1.15 : 1 / 1.15;
@@ -817,10 +834,12 @@ function zoomAt(node, clientX, clientY, deltaY) {
       st.panX = (st.panX - mouseRelX) * scaleRatio + mouseRelX;
       st.panY = (st.panY - mouseRelY) * scaleRatio + mouseRelY;
     }
-    clampPan(st, rect);
   }
 
   st.zoom = newZoom;
+  // Кламп ПОСЛЕ присвоения zoom: иначе при зуме из 1.0 кламп видит старый
+  // zoom <= 1 и обнуляет только что вычисленную панораму (баг T-COORD-A).
+  if (currentMode(node) !== "Side-by-Side") clampPan(st, rect);
   applyTransforms(node);
   return true;
 }
@@ -890,7 +909,7 @@ function makeLayer(doc) {
   return { box: box, scene: scene, img: img };
 }
 
-/** Ключевые кадры мигания: 1 → 0 → 1 за две фазы (совпадает с серверным GIF). */
+/** Ключевые кадры мигания: 1 → 0 → 1 за две фазы (чистая CSS-анимация — серверный GIF удалён, задача T1). */
 function ensureBlinkKeyframes(doc) {
   try {
     if (typeof doc.getElementById !== "function" || !doc.head) return;
@@ -1033,7 +1052,7 @@ function buildPreviewDom(node) {
   }, "Подключите изображения и запустите схему...");
   const badge = el(doc, "div", {
     position: "absolute", right: "8px", bottom: (DIM_BAR_H + 6) + "px", display: "none",
-    fontSize: "10px", fontWeight: "bold", color: "#38bdf8",
+    fontSize: "10px", fontWeight: "bold", color: "#ffffff",
     background: "rgba(0,0,0,0.65)", padding: "1px 5px", borderRadius: "4px",
     pointerEvents: "none",
   });
@@ -1049,7 +1068,7 @@ function buildPreviewDom(node) {
     position: "absolute", top: "28px", right: "8px", display: "none",
     maxWidth: "min(340px, 80%)", maxHeight: "calc(100% - 40px)", overflow: "auto",
     padding: "8px 10px", borderRadius: "6px", fontSize: "11px", lineHeight: "15px",
-    border: "1px solid rgba(56,189,248,0.6)", background: "rgba(18,18,18,0.97)",
+    border: "1px solid rgba(255,255,255,0.4)", background: "rgba(18,18,18,0.97)",
     color: "#cccccc", pointerEvents: "none",
   });
   helpBox.id = DOM_HELP;
@@ -1128,6 +1147,21 @@ function bindPreviewEvents(node) {
   if (!st.dom) return;
   const stage = st.dom.stage;
 
+  // Живое переключение legacy ↔ Nodes 2.0: при включении Vue-режима stage
+  // переезжает под LGraphNode (появляется предок [data-node-id]) и
+  // TransformPane перехватывает wheel в capture-фазе, а guard, не привязанный
+  // в legacy (canvasGuardEl → null), никто не вызывает повторно — без
+  // перепривязки Alt+wheel мёртв до перезагрузки. ensureGuard гоняем на
+  // событиях, которые доходят до stage в обоих режимах (enter/move/down).
+  const ensureGuard = function () {
+    const s = ensureState(node);
+    if (s.guard && s.guard.el && s.guard.el.isConnected === false) {
+      if (typeof s.guard.dispose === "function") s.guard.dispose();
+    }
+    bindGuardEvents(node);
+  };
+  stage.addEventListener("pointerenter", ensureGuard);
+
   stage.addEventListener("wheel", (e) => {
     if (e.altKey && navEnabled(node)) {
       // Наш зум: Alt+колесо только при сравнении двух кадров.
@@ -1143,6 +1177,7 @@ function bindPreviewEvents(node) {
   }, { passive: false });
 
   stage.addEventListener("pointerdown", (e) => {
+    ensureGuard();
     hideHelp(node);
     syncMode(node);
     if (e.button === 1) {
@@ -1158,20 +1193,24 @@ function bindPreviewEvents(node) {
     }
     if (e.button !== 0) return;
     if (currentMode(node) !== "Slider") return;
-    st.sliderDrag = true;
     if (typeof stage.setPointerCapture === "function") stage.setPointerCapture(e.pointerId);
     setSliderFromClientX(node, e.clientX);
     e.preventDefault();
   });
 
   stage.addEventListener("pointermove", (e) => {
+    ensureGuard();
     syncMode(node);
     if (st.panDrag) {
       const rect = { x: 0, y: 0, w: previewSize(node).w, h: previewSize(node).h };
+      const sr = stageRect(node);
+      const sx = sr.width > 0 ? sr.width / rect.w : 1;
+      const sy = sr.height > 0 ? sr.height / rect.h : 1;
       const cx = num(e.clientX, 0);
       const cy = num(e.clientY, 0);
-      st.panX += cx - st.lastPan[0];
-      st.panY += cy - st.lastPan[1];
+      // Экранные дельты делим на масштаб графа screen → local (баг T-COORD pan).
+      st.panX += (cx - st.lastPan[0]) / sx;
+      st.panY += (cy - st.lastPan[1]) / sy;
       st.lastPan = [cx, cy];
       clampPan(st, rect);
       applyTransforms(node);
@@ -1181,7 +1220,6 @@ function bindPreviewEvents(node) {
   });
 
   const endDrag = () => {
-    st.sliderDrag = false;
     st.panDrag = false;
   };
   stage.addEventListener("pointerup", endDrag);
@@ -1267,12 +1305,17 @@ function bindGuardEvents(node) {
     const st2 = ensureState(node);
     if (!st2.panDrag) return;
     if (!inside(e)) return;
+    const rect = { x: 0, y: 0, w: previewSize(node).w, h: previewSize(node).h };
+    const sr = stageRect(node);
+    const sx = sr.width > 0 ? sr.width / rect.w : 1;
+    const sy = sr.height > 0 ? sr.height / rect.h : 1;
     const cx = num(e.clientX, 0);
     const cy = num(e.clientY, 0);
-    st2.panX += cx - st2.lastPan[0];
-    st2.panY += cy - st2.lastPan[1];
+    // Экранные дельты делим на масштаб графа screen → local (баг T-COORD pan).
+    st2.panX += (cx - st2.lastPan[0]) / sx;
+    st2.panY += (cy - st2.lastPan[1]) / sy;
     st2.lastPan = [cx, cy];
-    clampPan(st2, { x: 0, y: 0, w: previewSize(node).w, h: previewSize(node).h });
+    clampPan(st2, rect);
     applyTransforms(node);
     if (e.stopPropagation) e.stopPropagation();
   };
@@ -1357,280 +1400,6 @@ function fitNodeToContent(node) {
   if (typeof node.expandToFitContent === "function") node.expandToFitContent();
 }
 
-// ── захват «как видишь» и сохранение ─────────────────────────────────────
-
-function drawSideBySideComposite(ctx, rect, img1, img2, st) {
-  const orient = sbsOrientation(st);
-  const vert = orient === "v";
-  const focusU = st.sbsFocusU !== undefined ? st.sbsFocusU : 0.5;
-  const focusV = st.sbsFocusV !== undefined ? st.sbsFocusV : 0.5;
-
-  const boxes = vert
-    ? [
-        { img: img1, boxOrigin: rect.y },
-        { img: img2, boxOrigin: rect.y + rect.h / 2 + SBS_GAP / 2 },
-      ]
-    : [
-        { img: img1, boxOrigin: rect.x },
-        { img: img2, boxOrigin: rect.x + rect.w / 2 + SBS_GAP / 2 },
-      ];
-
-  for (const box of boxes) {
-    if (!isDrawable(box.img)) continue;   // 404: complete=true, naturalWidth=0
-    const L = sbsHalfLayout(rect, box.img, box.boxOrigin, orient);
-    const effScale = L.fitScale * st.zoom;
-    const dW = L.iw * effScale;
-    const dH = L.ih * effScale;
-    const dX = L.halfCenterX - focusU * L.iw * effScale + st.panX;
-    const dY = L.halfCenterY - focusV * L.ih * effScale + st.panY;
-
-    ctx.save();
-    ctx.beginPath();
-    if (vert) ctx.rect(rect.x, box.boxOrigin, rect.w, L.halfH);
-    else ctx.rect(box.boxOrigin, rect.y, L.halfW, rect.h);
-    ctx.clip();
-    ctx.drawImage(box.img, dX, dY, dW, dH);
-    ctx.restore();
-  }
-
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
-  ctx.lineWidth = 1 / st.zoom;
-  ctx.beginPath();
-  if (vert) {
-    ctx.moveTo(rect.x, rect.y + rect.h / 2);
-    ctx.lineTo(rect.x + rect.w, rect.y + rect.h / 2);
-  } else {
-    ctx.moveTo(rect.x + rect.w / 2, rect.y);
-    ctx.lineTo(rect.x + rect.w / 2, rect.y + rect.h);
-  }
-  ctx.stroke();
-}
-
-// contain-fit: картинка целиком вписывается в rect с сохранением пропорций.
-function fitDrawRect(rect, img) {
-  const w = (img && (img.naturalWidth || img.width)) || 1;
-  const h = (img && (img.naturalHeight || img.height)) || 1;
-  const s = Math.min(rect.w / w, rect.h / h);
-  const dw = w * s;
-  const dh = h * s;
-  return { x: rect.x + (rect.w - dw) / 2, y: rect.y + (rect.h - dh) / 2, w: dw, h: dh };
-}
-
-function drawComposite(node, ctx, rect, mode, img1, img2, opacityVal, blinkSpeedVal, st) {
-  // ⛔ drawImage на 'broken' картинке (404) бросает InvalidStateError и валит
-  // весь кадр отрисовки — рисуем только пригодные элементы.
-  const ok1 = isDrawable(img1) ? img1 : null;
-  const ok2 = isDrawable(img2) ? img2 : null;
-  const state = st || ensureState(node);
-  // Вид (st.sliderView) применяется только в Side-by-Side; в режиме Slider
-  // шторка всегда (по задаче), в Off видов нет.
-  const view = mode === "Side-by-Side" ? (state.sliderView || "split") : "";
-  const soloView = view === "img1" || view === "img2";
-
-  // Side-by-Side с видимой парой: половинки как в DOM (с clip и зазором).
-  if (mode === "Side-by-Side" && ok1 && ok2 && !soloView) {
-    drawSideBySideComposite(ctx, rect, ok1, ok2, state);
-    return;
-  }
-
-  const viewCenterX = rect.x + rect.w / 2;
-  const viewCenterY = rect.y + rect.h / 2;
-
-  ctx.save();
-  ctx.translate(viewCenterX + state.panX, viewCenterY + state.panY);
-  ctx.scale(state.zoom, state.zoom);
-  ctx.translate(-viewCenterX, -viewCenterY);
-
-  // Режим Off и одиночные виды (Image 1 / Image 2): рисуем ровно то, что
-  // выбрал пользователь — без шторки и режимного смешивания. Зум/панорама
-  // выше уже применены, поэтому вид уважает навигацию.
-  if (mode === "Off" || soloView) {
-    const solo = mode === "Off" || view === "img1" ? ok1 : ok2;
-    if (solo) {
-      const f = fitDrawRect(rect, solo);
-      ctx.drawImage(solo, f.x, f.y, f.w, f.h);
-    }
-    ctx.restore();
-    return;
-  }
-
-  const baseImg = ok1 || ok2;
-  if (!baseImg) {
-    ctx.restore();
-    return;
-  }
-  const baseW = baseImg.naturalWidth || baseImg.width || 1;
-  const baseH = baseImg.naturalHeight || baseImg.height || 1;
-
-  const fitScale = Math.min(rect.w / baseW, rect.h / baseH);
-  const drawW = baseW * fitScale;
-  const drawH = baseH * fitScale;
-  const drawX = rect.x + (rect.w - drawW) / 2;
-  const drawY = rect.y + (rect.h - drawH) / 2;
-
-  if (ok1 && ok2) {
-    if (mode === "Slider") {
-      ctx.drawImage(ok1, drawX, drawY, drawW, drawH);
-
-      const splitX = rect.x + rect.w * st.sliderPos;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(splitX, rect.y, rect.x + rect.w - splitX, rect.h);
-      ctx.clip();
-      ctx.drawImage(ok2, drawX, drawY, drawW, drawH);
-      ctx.restore();
-
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
-      ctx.lineWidth = 1 / st.zoom;
-      ctx.beginPath();
-      ctx.moveTo(splitX, rect.y);
-      ctx.lineTo(splitX, rect.y + rect.h);
-      ctx.stroke();
-    } else if (mode === "Overlap") {
-      ctx.drawImage(ok2, drawX, drawY, drawW, drawH);
-      ctx.globalAlpha = Math.max(0, Math.min(1, opacityVal));
-      ctx.drawImage(ok1, drawX, drawY, drawW, drawH);
-      ctx.globalAlpha = 1.0;
-    } else if (mode === "Difference") {
-      ctx.drawImage(ok1, drawX, drawY, drawW, drawH);
-      ctx.globalCompositeOperation = "difference";
-      ctx.drawImage(ok2, drawX, drawY, drawW, drawH);
-      ctx.globalCompositeOperation = "source-over";
-    } else if (mode === "Blink") {
-      // Цикл A -> B -> A: 1/3 статика A, 1/3 кроссфейд, 1/3 статика B.
-      const speedSec = Math.max(1.0, num(blinkSpeedVal, 1.0));
-      const phaseDurMs = speedSec * 1000;
-      const totalLoopMs = phaseDurMs * 2;
-      const elapsed = Date.now() % totalLoopMs;
-      let alpha1 = 1.0;
-
-      if (elapsed < phaseDurMs) {
-        const t = elapsed / phaseDurMs;
-        if (t < 1 / 3) alpha1 = 1.0;
-        else if (t < 2 / 3) alpha1 = 0.5 + 0.5 * Math.cos((t - 1 / 3) * 3 * Math.PI);
-        else alpha1 = 0.0;
-      } else {
-        const t = (elapsed - phaseDurMs) / phaseDurMs;
-        if (t < 1 / 3) alpha1 = 0.0;
-        else if (t < 2 / 3) alpha1 = 0.5 - 0.5 * Math.cos((t - 1 / 3) * 3 * Math.PI);
-        else alpha1 = 1.0;
-      }
-
-      ctx.drawImage(ok2, drawX, drawY, drawW, drawH);
-      ctx.globalAlpha = Math.max(0, Math.min(1, alpha1));
-      ctx.drawImage(ok1, drawX, drawY, drawW, drawH);
-      ctx.globalAlpha = 1.0;
-    }
-  } else {
-    ctx.drawImage(baseImg, drawX, drawY, drawW, drawH);
-  }
-
-  ctx.restore();
-}
-
-function captureComposite(node, mode) {
-  const st = ensureState(node);
-  const size = previewSize(node);
-  const rect = { x: 0, y: 0, w: size.w, h: size.h };
-
-  // Вид применяется только в Side-by-Side (кнопки в футере): img1/img2 —
-  // только свою картинку, пара — обе; в Slider шторка всегда
-  // обе (по задаче), Off — одиночный просмотрщик Image 1.
-  const view = mode === "Side-by-Side" ? (st.sliderView || "split") : "";
-  const solo1 = mode === "Off" || view === "img1";
-  const solo2 = view === "img2";
-  const sbsPair = mode === "Side-by-Side" && !solo1 && !solo2;
-  const d1 = isDrawable(st.img1) ? st.img1 : null;
-  const d2 = isDrawable(st.img2) ? st.img2 : null;
-  if (solo1 && !d1) return null;
-  if (solo2 && !d2) return null;
-  if (!solo1 && !solo2 && (!d1 || !d2)) return null;
-  if (solo1 && solo2) return null;
-
-  const w1 = d1 ? (d1.naturalWidth || d1.width || 1) : 1;
-  const h1 = d1 ? (d1.naturalHeight || d1.height || 1) : 1;
-  const w2 = d2 ? (d2.naturalWidth || d2.width || 1) : 1;
-  const h2 = d2 ? (d2.naturalHeight || d2.height || 1) : 1;
-
-  const area1 = d1 ? w1 * h1 : 0;
-  const area2 = d2 ? w2 * h2 : 0;
-  const bigW = area1 >= area2 ? w1 : w2;
-  const bigH = area1 >= area2 ? h1 : h2;
-
-  // Вертикальная раскладка SBS (пара): половинки стоят друг над другом →
-  // канвас вдвое ВЫСОКИЙ; горизонтальная — вдвое шире. Одиночные виды и
-  // другие режимы — обычный размер.
-  const sbsVert = sbsPair && sbsOrientation(st) === "v";
-  const offW = (sbsPair && !sbsVert) ? bigW * 2 : bigW;
-  const offH = sbsVert ? bigH * 2 : bigH;
-
-  const offCanvas = document.createElement("canvas");
-  offCanvas.width = offW;
-  offCanvas.height = offH;
-  const offCtx = offCanvas.getContext("2d");
-  if (!offCtx) return null;
-
-  const offRect = { x: 0, y: 0, w: offW, h: offH };
-  offCtx.fillStyle = "#18181c";
-  offCtx.fillRect(0, 0, offW, offH);
-
-  const scaleX = offW / rect.w;
-  const scaleY = offH / rect.h;
-  const scaledState = Object.assign({}, st, {
-    panX: st.panX * scaleX,
-    panY: st.panY * scaleY,
-  });
-
-  drawComposite(
-    node,
-    offCtx,
-    offRect,
-    mode,
-    st.img1,
-    st.img2,
-    num(getValue(node, "opacity", 0.5), 0.5),
-    num(getValue(node, "blink_speed", 1.0), 1.0),
-    scaledState
-  );
-
-  return offCanvas.toDataURL("image/jpeg", 0.8);
-}
-
-async function saveCurrentView(node) {
-  const st = ensureState(node);
-  const btn = getWidget(node, SAVE_BTN);
-  const mode = currentMode(node);
-
-  // Какие картинки нужны для текущего режима/вида — тот же критерий,
-  // что у captureComposite: Off/одиночный вид — своя картинка, иначе пара.
-  const view = mode === "Side-by-Side" ? (st.sliderView || "split") : "";
-  const need = mode === "Off" || view === "img1" ? !st.img1
-    : view === "img2" ? !st.img2
-    : (!st.img1 || !st.img2);
-  if (need) {
-    flashLabel(btn, "⚠️ Нужны изображения для этого режима", SAVE_LABEL, 1800);
-    return;
-  }
-
-  try {
-    let resp;
-    if (mode === "Blink") {
-      if (!st.meta1 || !st.meta2) throw new Error("Нет метаданных исходных файлов");
-      resp = await postJson(BLINK_URI, { img1: st.meta1, img2: st.meta2 });
-    } else {
-      const dataUrl = captureComposite(node, mode);
-      if (!dataUrl) throw new Error("Не удалось захватить изображение");
-      resp = await postJson(SAVE_URI, { mode: mode, image: dataUrl });
-    }
-    const result = await resp.json();
-    if (result.success) flashLabel(btn, `✅ Сохранено: ${result.filename}`, SAVE_LABEL, 2400);
-    else flashLabel(btn, `⚠️ Ошибка: ${result.error || "неизвестно"}`, SAVE_LABEL, 2400);
-  } catch (err) {
-    flashLabel(btn, `⚠️ Ошибка: ${err && err.message ? err.message : err}`, SAVE_LABEL, 2400);
-  }
-  if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
-}
-
 // ── сборка ноды ───────────────────────────────────────────────────────────
 
 /** Ставит виджет сразу после виджета с именем afterName (порядок = порядок рендера). */
@@ -1650,12 +1419,6 @@ function addButtons(node) {
     openBtn.label = node._dscOpenPath ? OPEN_LABEL_READY : OPEN_LABEL_EMPTY;
     // Сразу под ячейкой префикса, выше блока OreX-функционала.
     insertWidgetAfter(node, openBtn, W_PREFIX);
-  }
-
-  if (!getWidget(node, SAVE_BTN)) {
-    const saveBtn = node.addWidget("button", SAVE_BTN, null, () => saveCurrentView(node), { serialize: false });
-    saveBtn.serialize = false;
-    saveBtn.label = SAVE_LABEL;
   }
 }
 
@@ -1730,9 +1493,11 @@ function onExecuted(node, message) {
   if (!node) return;
   ensureState(node);
 
-  const list = (message && (message.degg_compare_images || message.images)) || null;
+  const list = (message && message.degg_compare_images) || null;
   const openPath = message && message.degg_open_path && message.degg_open_path[0];
-  if (openPath) node._dscOpenPath = openPath;
+  // Ключ присутствует и с пустым путём: «» обязан чистить кэш пути, иначе
+  // кнопка «Открыть» ведёт на файл прошлого прогона (баг T-fix openPath).
+  if (openPath !== undefined) node._dscOpenPath = openPath;
 
   const had1 = !!ensureState(node).meta1;
   const had2 = !!ensureState(node).meta2;
@@ -1832,7 +1597,6 @@ if (typeof window !== "undefined") {
     MODES: MODES,
     PREVIEW_WIDGET: PREVIEW_WIDGET,
     OPEN_BTN: OPEN_BTN,
-    SAVE_BTN: SAVE_BTN,
     W_SAVE: W_SAVE,
     W_PREFIX: W_PREFIX,
     DOM_STAGE: DOM_STAGE,
@@ -1843,8 +1607,6 @@ if (typeof window !== "undefined") {
     OPEN_LABEL_READY: OPEN_LABEL_READY,
     OPEN_LABEL_EMPTY: OPEN_LABEL_EMPTY,
     OPEN_URI: OPEN_URI,
-    SAVE_URI: SAVE_URI,
-    BLINK_URI: BLINK_URI,
     HELP: HELP,
     num: num,
     getWidget: getWidget,
@@ -1890,9 +1652,5 @@ if (typeof window !== "undefined") {
     clampPan: clampPan,
     canvasGuardEl: canvasGuardEl,
     bindGuardEvents: bindGuardEvents,
-    captureComposite: captureComposite,
-    drawComposite: drawComposite,
-    fitDrawRect: fitDrawRect,
-    saveCurrentView: saveCurrentView,
   };
 }

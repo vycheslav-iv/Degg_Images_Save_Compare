@@ -3,7 +3,7 @@
 // фронтенда по DOM-виджету (скил comfyui-dom-widget-sizing):
 //   • расширение зарегистрировано, beforeRegisterNodeDef фильтрует по имени;
 //   • порядок виджетов: save_mode → filename_prefix → кнопка открытия → mode →
-//     opacity → blink_speed → кнопка сохранения → холст сравнения;
+//     opacity → blink_speed → холст сравнения;
 //   • превью — DOM-виджет (addDOMWidget): НЕТ canvas-draw/mouse/computeSize,
 //     ЕСТЬ getMinHeight (пол высоты) и НЕТ getHeight (иначе высота пинится и
 //     превью не растягивается вместе с нодой);
@@ -180,59 +180,6 @@ class FakeImg extends FakeEl {
   }
 }
 
-// <canvas> нужен только пути «Сохранить текущий вид» (offscreen-композит).
-class FakeCanvas extends FakeEl {
-  constructor() {
-    super("canvas");
-    this.width = 0;
-    this.height = 0;
-  }
-  getContext() {
-    return makeCtx();
-  }
-  toDataURL() {
-    return "data:image/jpeg;base64,QUJD";
-  }
-}
-
-let lastCtx = null;
-function makeCtx() {
-  const ctx = {
-    canvas: new FakeEl("canvas"),
-    globalAlpha: 1,
-    globalCompositeOperation: "source-over",
-    fillStyle: "#000",
-    strokeStyle: "#000",
-    lineWidth: 1,
-    font: "",
-    textAlign: "left",
-    textBaseline: "top",
-    calls: [],
-    drawnImages: [],
-    drawArgs: [],
-  };
-  const noop = (name) => (...args) => {
-    ctx.calls.push(name);
-  };
-  for (const m of [
-    "save", "restore", "beginPath", "closePath", "rect", "clip", "fill", "stroke",
-    "fillRect", "strokeRect", "moveTo", "lineTo", "arc", "arcTo",
-    "translate", "scale", "setTransform", "fillText", "roundRect", "measureText",
-  ]) ctx[m] = noop(m);
-  ctx.drawImage = (...args) => {
-    ctx.calls.push("drawImage");
-    ctx.drawArgs.push(args);
-    const img = args[0];
-    ctx.drawnImages.push(img);
-    if (!img || !img.complete || !(img.naturalWidth > 0)) {
-      throw new Error("InvalidStateError: image is in the 'broken' state");
-    }
-  };
-  ctx.measureText = (t) => ({ width: String(t).length * 6 });
-  lastCtx = ctx;
-  return ctx;
-}
-
 const mainCanvasEl = new FakeEl("canvas");
 mainCanvasEl.width = 1200;
 mainCanvasEl.height = 800;
@@ -245,12 +192,10 @@ const appInstance = {
   },
 };
 
-let lastCanvas = null;
 const documentStub = {
   createElement: (tag) => {
     const t = String(tag).toLowerCase();
     if (t === "img") return new FakeImg();
-    if (t === "canvas") { lastCanvas = new FakeCanvas(); return lastCanvas; }
     return new FakeEl(tag);
   },
   head: new FakeEl("head"),
@@ -258,6 +203,15 @@ const documentStub = {
   getElementById: () => null,
   addEventListener: () => { documentAdds += 1; },
   removeEventListener: () => {},
+};
+
+// Захват отложенных колбэков: flashLabel() планирует таймер через 2с, а
+// заглушка setTimeout не исполняла его — порча label оставалась незамеченной.
+const timerQueue = [];
+/** Прогнать все отложенные колбэки (эмуляция таймера). */
+const flushTimers = () => {
+  const q = timerQueue.splice(0);
+  for (const t of q) t.fn();
 };
 
 const sandbox = {
@@ -272,7 +226,7 @@ const sandbox = {
     api: { api: { apiURL: (p) => `http://127.0.0.1:8188${p}`, fetchApi: () => Promise.resolve({ json: () => Promise.resolve({ success: true }) }) } },
   },
   app: appInstance,
-  setTimeout: () => 0,
+  setTimeout: (fn, ms) => { timerQueue.push({ fn: fn, ms: ms }); return timerQueue.length; },
   clearTimeout: () => {},
   requestAnimationFrame: (fn) => { rafQueue.push(fn); return rafQueue.length; },
   fetch: () => Promise.resolve({ json: () => Promise.resolve({ success: true }) }),
@@ -329,7 +283,7 @@ function makeNode() {
   // виджеты, которые создаёт фронтенд из INPUT_TYPES
   node.widgets.push(
     { name: "save_mode", type: "toggle", value: true, options: {}, last_y: 26, computeSize: () => [0, 24] },
-    { name: "filename_prefix", type: "text", value: "ComfyUI", options: {}, el: { style: {} }, last_y: 50, computeSize: () => [0, 24] },
+    { name: "filename_prefix", type: "text", value: "ComfyUI", options: {}, last_y: 50, computeSize: () => [0, 24] },
     { name: "mode", type: "combo", value: "Off", options: {}, last_y: 74, computeSize: () => [0, 24] },
     { name: "opacity", type: "number", value: 0.5, options: {}, last_y: 98, computeSize: () => [0, 24] },
     { name: "blink_speed", type: "number", value: 1.0, options: {}, last_y: 122, computeSize: () => [0, 24] },
@@ -373,7 +327,7 @@ const names = node.widgets.map((w) => w.name);
 check("порядок виджетов как в задаче",
   JSON.stringify(names) === JSON.stringify([
     "save_mode", "filename_prefix", "open_image_1", "mode", "opacity",
-    "blink_speed", "save_current_view", "degg_compare_preview",
+    "blink_speed", "degg_compare_preview",
   ]), JSON.stringify(names));
 check("id готовности выставлен", node._dscReady === true);
 check("node.onMouseMove НЕ перезаписан (нет моста координат)", node.onMouseMove === undefined);
@@ -462,6 +416,8 @@ check("dim (Off): подпись Image 2 скрыта (режим просмот
   dim2El.style.display === "none", dim2El.style.display);
 check("бейдж зума поднят над футер подписей",
   badgeEl.style.bottom === ((DSC.DIM_BAR_H || 0) + 6) + "px", badgeEl.style.bottom);
+check("T5: бейдж кратности зума — цифры БЕЛЫЕ (стандартный стиль, не синие)",
+  badgeEl.style.color === "#ffffff", `color=${badgeEl.style.color}`);
 
 // ── слайдер: тонкая СЕРАЯ линия (по задаче — вдвое тоньше, без ручки) ────
 const knobEl = findEl(lineEl, (e) => e.id === "dsc-knob");
@@ -516,15 +472,14 @@ const fp = DSC.getWidget(node, DSC.W_PREFIX);
 DSC.getWidget(node, DSC.W_SAVE).value = false;
 DSC.applySaveMode(node);
 check("Preview: filename_prefix погашен (w.disabled)", fp.disabled === true);
-check("Preview: filename_prefix скрыт в DOM", fp.el.style.display === "none");
+check("Preview: filename_prefix options.disabled (поле, которое читает фронтенд)",
+  !!(fp.options && fp.options.disabled === true));
 DSC.getWidget(node, DSC.W_SAVE).value = true;
 DSC.applySaveMode(node);
-check("Save: filename_prefix активен", fp.disabled === false && fp.el.style.display === "");
+check("Save: filename_prefix активен", fp.disabled === false && !!(fp.options && fp.options.disabled === false));
 
 const openBtn = DSC.getWidget(node, DSC.OPEN_BTN);
-const saveBtn = DSC.getWidget(node, DSC.SAVE_BTN);
 check("кнопка открытия создана без serialize", openBtn && openBtn.serialize === false);
-check("кнопка сохранения создана без serialize", saveBtn && saveBtn.serialize === false);
 check("кнопка открытия: пустая надпись — «No image» (как в Image Save/Preview)",
   openBtn.label === "No image", openBtn.label);
 const openReadyLabel = DSC.OPEN_LABEL_READY || "";
@@ -532,8 +487,13 @@ const openEmptyLabel = DSC.OPEN_LABEL_EMPTY || "";
 check("подписи кнопок ровно как в Image Save/Preview (без эмодзи-иконок)",
   openReadyLabel === "Open in Viewer" && openEmptyLabel === "No image",
   `${openReadyLabel} / ${openEmptyLabel}`);
-check("кнопка сохранения: подпись без иконки 💾 (по задаче)",
-  saveBtn.label === "Сохранить текущий вид", saveBtn.label);
+
+// ── T-fix: клик по «No image» без пути не должен планировать порчу label ───
+// Старый код: flashLabel(EMPTY) без restore → через 2с label = undefined.
+openBtn.callback();
+flushTimers();
+check("T-fix: клик по «No image» не затирает подпись кнопки (flash без restore)",
+  openBtn.label === openEmptyLabel, String(openBtn.label));
 
 // ── 5 режимов на DOM/CSS ──────────────────────────────────────────────────
 stage.clientWidth = 600;
@@ -645,6 +605,15 @@ check("Off: Image 1 поверх Image 2",
 check("Off: без режимного blend/анимации",
   !layer1.img.style.mixBlendMode && !layer1.img.style.animation
   && !layer2.img.style.mixBlendMode && !layer2.img.style.opacity);
+// В Off (режим, отключающий сравнение) второе изображение не показывается
+// вовсе: раньше слой Image 2 лежал под Image 1 и проглядывал в letterbox-полях.
+check("Off: слой Image 2 скрыт (режим отключает сравнение)",
+  layer2.box.style.display === "none", String(layer2.box.style.display));
+check("Off: слой Image 1 остаётся видимым",
+  layer1.box.style.display !== "none", String(layer1.box.style.display));
+setMode("Slider");
+check("выход из Off в Slider: слой Image 2 появляется без повторного прогона",
+  layer2.box.style.display === "", String(layer2.box.style.display));
 setMode("Slider");
 
 DSC.getWidget(node, "blink_speed").value = 1.0;
@@ -684,13 +653,6 @@ check("SBS ландшафт: кадры друг над другом",
   `${sbsDom.a.box.style.width} / ${sbsDom.a.box.style.height} / top=${sbsDom.b.box.style.top}`);
 check("SBS ландшафт: зазор между кадрами снизу у Image 1",
   sbsDom.a.box.style.height.indexOf("50%") > 0, sbsDom.a.box.style.height);
-
-lastCanvas = null;
-check("захват SBS ландшафт: строка data URL",
-  typeof DSC.captureComposite(sbsNode, "Side-by-Side") === "string");
-check("захват SBS ландшафт: канвас в высоту ДВУХ половин",
-  !!lastCanvas && lastCanvas.width === 640 && lastCanvas.height === 960,
-  lastCanvas ? `${lastCanvas.width}×${lastCanvas.height}` : "нет канваса");
 
 const halfV = typeof DSC.sbsHalfAt === "function"
   ? DSC.sbsHalfAt(sbsSt, { x: 0, y: 0, w: 600, h: 320 }, 300, 10, "v") : null;
@@ -741,22 +703,6 @@ check("SBS: panX изменился при перетаскивании", sbsSt.
 sbsDom.stage.dispatch("pointerup", { button: 1, clientX: 260, clientY: 135 });
 check("SBS: панорама завершена", sbsSt.panDrag === false);
 
-// Канвас «Сохранить текущий вид»: dX включает панораму (совпадает с DOM).
-const sctxA = makeCtx();
-sbsSt.panX = 0;
-sbsSt.panY = 0;
-DSC.drawComposite(sbsNode, sctxA, { x: 0, y: 0, w: 600, h: 320 }, "Side-by-Side",
-  sbsSt.img1, sbsSt.img2, 0.5, 1.0, sbsSt);
-const sctxB = makeCtx();
-sbsSt.panX = 37;
-sbsSt.panY = 0;
-DSC.drawComposite(sbsNode, sctxB, { x: 0, y: 0, w: 600, h: 320 }, "Side-by-Side",
-  sbsSt.img1, sbsSt.img2, 0.5, 1.0, sbsSt);
-const sdxA = sctxA.drawArgs.length ? sctxA.drawArgs[0][1] : null;
-const sdxB = sctxB.drawArgs.length ? sctxB.drawArgs[0][1] : null;
-check("SBS-канвас: panX сдвигает drawImage (dX +37)",
-  sdxA !== null && sdxB !== null && Math.abs((sdxB - sdxA) - 37) < 0.01,
-  `${sdxA} → ${sdxB}`);
 sbsSt.zoom = 1;
 sbsSt.panX = 0;
 sbsSt.panY = 0;
@@ -843,6 +789,57 @@ setMode("Slider");
 stage._closest["[data-node-id]"] = null;
 st.zoom = 1; st.panX = 0; st.panY = 0;
 
+// ── живое переключение legacy → Nodes 2.0 (без перезагрузки браузера) ─────
+// Нода создана в legacy: у stage нет предка [data-node-id] → canvasGuardEl
+// возвращает null и guard не привязан. При живом включении Nodes 2.0 stage
+// переезжает под LGraphNode, TransformPane начинает перехватывать wheel в
+// capture-фазе, а bindGuardEvents никто не вызывает повторно — до фикса
+// Alt+wheel мёртв до перезагрузки браузера/смены воркфлоу. Перепривязка —
+// ensureGuard на событиях, которые доходят до stage в обоих режимах.
+setMode("Side-by-Side");
+if (guard && typeof guard.dispose === "function") guard.dispose();
+check("живое переключение: до переключения (legacy) guard не привязан",
+  st.guard == null, String(st.guard && st.guard.el && st.guard.el.tagName));
+stage._closest["[data-node-id]"] = null;
+
+// переключение включено: элемент переехал под LGraphNode [data-node-id]
+stage._closest["[data-node-id]"] = nodeEl2;
+
+// A) pointerenter доходит до stage → guard перепривязывается
+stage.dispatch("pointerenter");
+check("после переключения: pointerenter перепривязывает guard",
+  !!st.guard && st.guard.el === gEl,
+  st.guard ? String(st.guard.el && st.guard.el.tagName) : "null");
+gStopped = false;
+st.zoom = 1; st.panX = 0; st.panY = 0;
+gEl.dispatch("wheel", gEv({ altKey: true, deltaY: -100 }));
+check("после переключения: Alt+wheel через предок зумит превью",
+  st.zoom > 1, String(st.zoom));
+check("после переключения: событие остановлено до графа", gStopped === true);
+const liveGuard = st.guard;
+stage.dispatch("pointerenter");
+check("повторный pointerenter не плодит привязку", st.guard === liveGuard);
+
+// B) только pointermove (без enter) тоже перепривязывает
+if (liveGuard && typeof liveGuard.dispose === "function") liveGuard.dispose();
+check("guard снят перед сценарием B", st.guard == null, String(st.guard));
+stage.dispatch("pointermove", { clientX: 10, clientY: 10 });
+check("после переключения: pointermove перепривязывает guard",
+  !!st.guard && st.guard.el === gEl,
+  st.guard ? String(st.guard.el && st.guard.el.tagName) : "null");
+
+// C) только pointerdown (без enter/move) тоже перепривязывает
+if (st.guard && typeof st.guard.dispose === "function") st.guard.dispose();
+check("guard снят перед сценарием C", st.guard == null, String(st.guard));
+stage.dispatch("pointerdown", { button: 0 });
+check("после переключения: pointerdown перепривязывает guard",
+  !!st.guard && st.guard.el === gEl,
+  st.guard ? String(st.guard.el && st.guard.el.tagName) : "null");
+
+// возврат состояния: legacy (предок снова недоступен)
+stage._closest["[data-node-id]"] = null;
+st.zoom = 1; st.panX = 0; st.panY = 0;
+
 // ── шторка: следует за курсором без drag-состояния (как стандартная нода) ──
 setMode("Slider");
 stage._rectLeft = 100;
@@ -856,9 +853,11 @@ check("шторка: линия переехала", lineEl.style.left === "90%"
 stage.dispatch("pointermove", { clientX: 9999, clientY: 200 });
 check("шторка: позиция зажата в 0..1", st.sliderPos === 1, String(st.sliderPos));
 stage.dispatch("pointerdown", { button: 0, clientX: 100 + 600 * 0.5, clientY: 200 });
-check("шторка: drag начат по pointerdown", st.sliderDrag === true);
+// T-fix: поле sliderDrag было write-only (запись/сброс, ноль чтений в js) —
+// контракт задачи: удалить поле И эти проверки жизненного цикла.
+check("T-fix: флаг sliderDrag удалён из стейта (был write-only, чтений нет)",
+  !("sliderDrag" in st), "sliderDrag" in st ? "остался" : "нет");
 stage.dispatch("pointerup", { button: 0, clientX: 400, clientY: 200 });
-check("шторка: drag завершён по pointerup", st.sliderDrag === false);
 check("шторка: середину можно выставить", Math.abs(st.sliderPos - 0.5) < 0.01, String(st.sliderPos));
 
 // ── зум / панорама / сброс (в Side-by-Side — навигация разрешена) ─────────
@@ -913,6 +912,41 @@ stage.dispatch("dblclick", { clientX: 400, clientY: 200 });
 check("двойной клик: сброс зума и панорамы", st.zoom === 1 && st.panX === 0 && st.panY === 0);
 check("clampPan: при зуме 1 панорама обнуляется",
   (() => { st.panX = 40; st.panY = 40; DSC.clampPan(st, { x: 0, y: 0, w: 600, h: 320 }); return st.panX === 0 && st.panY === 0; })());
+
+// ── T-COORD: два бага zoomAt, невидимых при scale=1 и при зуме из >1 ──────
+// A) порядок: clampPan вызывается ДО st.zoom = newZoom → при зуме из 1.0
+//    кламп видит zoom<=1 и обнуляет только что вычисленную панораму
+//    (первый Alt+wheel курсором не в центре обязан сдвигать кадр к курсору).
+setMode("Slider");
+st.zoom = 1; st.panX = 0; st.panY = 0;
+// курсор слева от центра: left=100 → clientX=250, localX=150, mouseRel=−150
+// ожидаемая панорама: (0 − (−150)) × 1.15 + (−150) = 22.5 (кламп ±45 не режет)
+DSC.zoomAt(node, 100 + 150, 50 + 160, -100);
+check("T-COORD-A: зум из 1.0 курсором не в центре — панорама сдвигается к курсору (clampPan после присвоения zoom)",
+  Math.abs(st.panX - 22.5) < 0.2, `panX=${st.panX}`);
+// B) приведение экранных координат к локальным при зуме графа ×2:
+//    в центре ЭКРАННОЙ области локальный центр — не середина локального rect
+const rectOwnedBefore = Object.prototype.hasOwnProperty.call(stage, "getBoundingClientRect");
+stage.getBoundingClientRect = function () {
+  const r = FakeEl.prototype.getBoundingClientRect.call(stage);
+  return { left: r.left, top: r.top, width: r.width * 2, height: r.height * 2 };
+};
+st.zoom = 2; st.panX = 0; st.panY = 0;
+// курсор в центре ЭКРАННОЙ области: left=100, width=1200 → 700; top=50, height=640 → 370
+DSC.zoomAt(node, 100 + 600, 50 + 320, -100);
+check("T-COORD-B: zoomAt при зуме графа ×2 — курсор в центре не сдвигает панораму",
+  Math.abs(st.panX) < 0.5 && Math.abs(st.panY) < 0.5, `pan=(${st.panX},${st.panY})`);
+setMode("Side-by-Side");
+st.zoom = 2; st.panX = 0; st.panY = 0;
+stage.dispatch("pointerdown", { button: 1, clientX: 400, clientY: 300 });
+stage.dispatch("pointermove", { button: 1, clientX: 360, clientY: 300, buttons: 4 });
+check("T-COORD: панорама при зуме графа ×2 делит дельту на масштаб (Δ−40 → −20)",
+  Math.abs(st.panX - (-20)) < 0.5, `panX=${st.panX}`);
+stage.dispatch("pointerup", { button: 1, clientX: 360, clientY: 300 });
+if (rectOwnedBefore) stage.getBoundingClientRect = FakeEl.prototype.getBoundingClientRect;
+else delete stage.getBoundingClientRect;
+st.zoom = 1; st.panX = 0; st.panY = 0;
+setMode("Side-by-Side");
 
 // ── навигация только в Side-by-Side при двух видимых кадрах (по задаче) ───
 const nav = (n) => (typeof DSC.navEnabled === "function" ? DSC.navEnabled(n) : "missing");
@@ -1021,22 +1055,7 @@ check("битая картинка: слот обнулён, метаданны�
   bst.img1 === null && bst.meta1 === null, JSON.stringify({ img: !!bst.img1, meta: bst.meta1 }));
 check("битая картинка: слой скрыт (не рисуется «сломанный» элемент)",
   bLayerA.style.display === "none", bLayerA.style.display);
-const shotBroken = (() => {
-  try { return DSC.captureComposite(brokenNode, "Slider"); } catch (e) { brokenErr = e; return "throw"; }
-})();
-check("битая картинка: captureComposite не падает и отдаёт null", shotBroken === null, String(shotBroken));
-const bctx = makeCtx();
-let drawErr = null;
-try {
-  DSC.drawComposite(brokenNode, bctx, { x: 0, y: 0, w: 600, h: 320 }, "Slider",
-    { complete: true, naturalWidth: 0, naturalHeight: 0 },
-    (bst.dom && bst.dom.b && bst.dom.b.img) || new FakeImg(), 0.5, 1.0, bst);
-} catch (e) { drawErr = e; }
-check("битая картинка: drawComposite не бросает (guard naturalWidth)", !drawErr, drawErr && drawErr.message);
-check("битая картинка: drawImage для сломанного элемента не вызывался",
-  !bctx.drawnImages.some((i) => i && i.complete && !(i.naturalWidth > 0)), JSON.stringify(bctx.drawnImages.length));
-
-// ── captureComposite «как видишь» ─────────────────────────────────────────
+// ── слоты картинок в DOM-слои (goodNode) ─────────────────────────────────
 const goodNode = makeNode();
 protoHolder.onNodeCreated.call(goodNode);
 rafQueue.forEach((f) => f());
@@ -1050,51 +1069,6 @@ check("слоты: img-элементы поставлены в DOM-слои",
 check("слоты: src ведёт на /view", (gst.img1.src || "").indexOf("/view?filename=a.png") > 0, gst.img1.src);
 check("слоты: подпись размеров в DOM", gdom.dim1.textContent === "640×480", gdom.dim1.textContent);
 check("слоты: подсказка-заглушка скрыта при наличии картинки", gdom.hint.style.display === "none");
-const shot = DSC.captureComposite(goodNode, "Slider");
-check("captureComposite возвращает data URL", typeof shot === "string" && shot.indexOf("data:image/jpeg") === 0, String(shot));
-check("captureComposite при отсутствии картинок → null",
-  DSC.captureComposite(makeNode(), "Slider") === null);
-check("captureComposite для всех 6 режимов не падает", (() => {
-  try {
-    for (const m of ["Slider", "Side-by-Side", "Overlap", "Difference", "Blink", "Off"]) {
-      if (typeof DSC.captureComposite(goodNode, m) !== "string") return false;
-    }
-    return true;
-  } catch (e) { return false; }
-})());
-
-// Режим Off (просмотрщик): захват обязан рисовать Image 1, а не пустой канвас.
-lastCtx = null;
-DSC.captureComposite(goodNode, "Off");
-check("захват Off: рисует Image 1",
-  !!lastCtx && lastCtx.drawnImages.length >= 1 && lastCtx.drawnImages[0] === gst.img1,
-  lastCtx ? `draws=${lastCtx.drawnImages.length}` : "нет lastCtx");
-
-// Виды (кнопки) применяются в Side-by-Side; в Slider вид не влияет (по задаче).
-gst.sliderView = "img2";
-DSC.applyMode(goodNode);
-lastCtx = null;
-DSC.captureComposite(goodNode, "Slider");
-check("захват Slider: вид не влияет — шторка рисует обе картинки",
-  !!lastCtx && lastCtx.drawnImages.length === 2,
-  lastCtx ? `draws=${lastCtx.drawnImages.length}` : "нет lastCtx");
-lastCtx = null;
-DSC.captureComposite(goodNode, "Side-by-Side");
-check("захват SBS вид «Image 2»: только вторая картинка",
-  !!lastCtx && lastCtx.drawnImages.length === 1 && lastCtx.drawnImages[0] === gst.img2,
-  lastCtx ? `draws=${lastCtx.drawnImages.length}` : "нет lastCtx");
-gst.sliderView = "split";
-DSC.applyMode(goodNode);
-lastCtx = null;
-lastCanvas = null;
-DSC.captureComposite(goodNode, "Side-by-Side");
-check("захват SBS вид «Пара»: пара кадров, стандартная геометрия SBS",
-  !!lastCtx && lastCtx.drawnImages.length === 2 && !!lastCanvas
-  && lastCanvas.width === 640 && lastCanvas.height === 960,
-  lastCtx ? `draws=${lastCtx.drawnImages.length} w=${lastCanvas && lastCanvas.width} h=${lastCanvas && lastCanvas.height}` : "нет lastCtx");
-gst.sliderView = "split";
-DSC.applyMode(goodNode);
-
 // ── ⭐ персистентность при переключении воркфлоу ──────────────────────────
 const msg = {
   degg_compare_images: [
@@ -1116,6 +1090,59 @@ check("onExecuted: метаданные записаны в properties",
   && node.properties.dsc_meta["2"].type === "temp");
 check("onExecuted: путь записан в properties", node.properties.dsc_open_path === msg.degg_open_path[0]);
 check("onExecuted: url картинки ведёт на /view", st.img1.src.indexOf("/view?filename=run_00001_.png") > 0, st.img1.src);
+
+// ── T-fix: onExecuted принимает ТОЛЬКО свои ключи (images — мёртвый фолбэк) ─
+protoHolder.onExecuted.call(node, {
+  images: [{ slot: 1, filename: "foreign.png", subfolder: "", type: "output", width: 9, height: 9 }],
+});
+check("T-fix: чужой ключ images НЕ подхватывается (Python шлёт degg_compare_images)",
+  st.meta1 && st.meta1.filename === "run_00001_.png", st.meta1 && st.meta1.filename);
+
+// ── T-fix: пустая строка пути ОЧИЩАЕТ _dscOpenPath, а не держит старый ──────
+protoHolder.onExecuted.call(node, {
+  degg_compare_images: [
+    { slot: 1, filename: "run_00001_.png", subfolder: "", type: "output", width: 512, height: 768 },
+    { slot: 2, filename: "_deggcmp2_ab_00001_.png", subfolder: "", type: "temp", width: 512, height: 768 },
+  ],
+  degg_open_path: [""],
+});
+check("T-fix: пустой путь в degg_open_path очищает _dscOpenPath",
+  node._dscOpenPath === "", JSON.stringify(node._dscOpenPath));
+// вернуть состояние для следующих проверок (node2 копирует properties)
+node._dscOpenPath = msg.degg_open_path[0];
+DSC.persistImages(node);
+DSC.refreshLabels(node);
+
+// ── T-fix: в Off показывается только Image 1 — без неё заглушка видна ──────
+const prevModeFix = DSC.currentMode(node);
+setMode("Off");
+const keepImg1 = st.img1;
+st.img1 = null;
+DSC.refreshLabels(node);
+check("T-fix: Off + нет Image 1 + есть Image 2 → подсказка-заглушка видна",
+  st.dom.hint.style.display === "block", st.dom.hint.style.display);
+st.img1 = keepImg1;
+DSC.refreshLabels(node);
+setMode(prevModeFix);
+
+// ── T-fix: выход из Side-by-Side сбрасывает зум/панораму/фокус (вариант А) ──
+// В SBS зум/пан доступны через Alt+wheel/среднюю кнопку (navEnabled).
+// В других режимах navEnabled=false, но sharedTransform применяет zoom/pan
+// — без сброса зум «залипает» и не сбросить (гейт закрыт).
+setMode("Side-by-Side");
+st.zoom = 2; st.panX = 50; st.panY = -30; st.sbsFocusU = 0.2; st.sbsFocusV = 0.8;
+setMode("Slider");
+check("T-fix: выход из SBS сбрасывает зум/панораму/фокус",
+  st.zoom === 1 && st.panX === 0 && st.panY === 0 &&
+  st.sbsFocusU === 0.5 && st.sbsFocusV === 0.5,
+  `z=${st.zoom} pan=(${st.panX},${st.panY}) f=(${st.sbsFocusU},${st.sbsFocusV})`);
+
+// Страховка: при вызове applyMode в SBS (смены вида/виджетов) зум НЕ сбрасывается.
+st.zoom = 1.5; st.panX = 10;
+setMode("Side-by-Side");
+check("T-fix: повторный applyMode в SBS сохраняет зум/панораму",
+  st.zoom === 1.5 && st.panX === 10,
+  `z=${st.zoom} panX=${st.panX}`);
 
 // Смена воркфлоу: нода пересоздаётся из JSON (properties сериализуются),
 // onExecuted НЕ вызывается — картинки обязаны вернуться из properties.
@@ -1147,6 +1174,29 @@ check("отсутствующий файл не оставляет битое и
 check("отсутствующий файл: слой скрыт",
   ((st3.dom && st3.dom.a && st3.dom.a.img) || { style: {} }).style.display === "none");
 
+// ── задачи 1/3/4: красные проверки (до правки) ────────────────────────────
+check("T1: кнопка «Сохранить текущий вид» удалена",
+  DSC.SAVE_BTN === undefined && !DSC.getWidget(node, "save_current_view"));
+check("T1: saveCurrentView/captureComposite/drawComposite удалены",
+  typeof DSC.saveCurrentView === "undefined"
+  && typeof DSC.captureComposite === "undefined"
+  && typeof DSC.drawComposite === "undefined");
+check("T1: JS-роуты сохранения (SAVE_URI/BLINK_URI) удалены",
+  DSC.SAVE_URI === undefined && DSC.BLINK_URI === undefined);
+check("T1: HELP без записи save_btn «Сохранить текущий вид»",
+  !(DSC.HELP || []).some((h) => h.name === "save_btn"));
+
+setMode("Off");
+check("T3: Off — opacity погашен (w.disabled)", DSC.getWidget(node, "opacity").disabled === true);
+check("T3: Off — blink_speed погашен (w.disabled)", DSC.getWidget(node, "blink_speed").disabled === true);
+setMode("Slider");
+check("T3: выход из Off — слайдеры снова активны",
+  DSC.getWidget(node, "opacity").disabled === false
+  && DSC.getWidget(node, "blink_speed").disabled === false);
+
+check("T4: отступ кнопок вида от изображения ≥ 4px", (DSC.DIM_BAR_H - 16) / 2 >= 4,
+  `DIM_BAR_H=${DSC.DIM_BAR_H}`);
+
 // ── удаление ноды ─────────────────────────────────────────────────────────
 protoHolder.onRemoved.call(node);
 check("onRemoved: состояние очищено", node._cmp === undefined);
@@ -1156,9 +1206,8 @@ const url = DSC.metaUrl({ filename: "a b.png", subfolder: "sub", type: "output" 
 check("metaUrl: кодирует имя и subfolder",
   url === "http://127.0.0.1:8188/view?filename=a%20b.png&subfolder=sub&type=output", url);
 check("metaUrl: без filename → пустая строка", DSC.metaUrl(null) === "");
-check("роуты совпадают с Python", DSC.OPEN_URI === "/degg_images_save_compare/open_file"
-  && DSC.SAVE_URI === "/degg_images_save_compare/save_compare"
-  && DSC.BLINK_URI === "/degg_images_save_compare/save_blink_gif");
+check("роуты: OPEN_URI совпадает с Python",
+  DSC.OPEN_URI === "/degg_images_save_compare/open_file", DSC.OPEN_URI);
 
 console.log("");
 console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);

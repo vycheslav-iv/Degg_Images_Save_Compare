@@ -6,7 +6,6 @@ Degg_Images_Save_Compare — один узел вместо двух:
     SavePreviewImage): Save -> output с префиксом, Preview -> temp;
   • интерактивное сравнение двух изображений (как ↔️ OreX Image Compare):
     режимы Slider / Side-by-Side / Overlap / Difference / Blink,
-    кнопка «Сохранить текущий вид» (роуты save_compare / save_blink_gif),
     кнопка открытия Image 1 в программе просмотра Windows по умолчанию.
 
 Входы:  Image 1 (основное, проходное), Image 2 (для сравнения).
@@ -20,38 +19,16 @@ Degg_Images_Save_Compare — один узел вместо двух:
    (нет ComfyUI — просто нет роутов, импорт не падает).
 """
 
-import base64
-import datetime
-import glob
 import json
 import logging
 import os
 import random
-import re
 
 logger = logging.getLogger(__name__)
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
-# Режим сравнения -> подпапка для «как видишь» (output/<дата>/<подпапка>/)
-MODE_FOLDER_MAP = {
-    "Slider": "slider",
-    "Side-by-Side": "sidebyside",
-    "Overlap": "overlap",
-    "Difference": "difference",
-    "Blink": "blink",
-    "Off": "off",
-}
-
 MODES = ["Off", "Slider", "Side-by-Side", "Overlap", "Difference", "Blink"]
-
-# Тайминг GIF режима Blink: длительность одной фазы (мс) и число кадров
-# кроссфейда на переход. Полный цикл A->B->A = 2 * BLINK_PHASE_MS.
-BLINK_PHASE_MS = 1500
-BLINK_TRANSITION_FRAMES = 10
-
-# Имя файлов, которые сохраняет кнопка «Сохранить текущий вид»
-COMPARE_STEM = "Degg_Compare"
 
 NODE_KEY = "Degg_Images_Save_Compare"
 
@@ -62,45 +39,6 @@ NODE_KEY = "Degg_Images_Save_Compare"
 
 def random_suffix(n: int = 5) -> str:
     return "".join(random.choice(ALPHABET) for _ in range(n))
-
-
-def today_folder() -> str:
-    """Актуальная дата на момент вызова (не дата старта сервера)."""
-    return datetime.datetime.now().strftime("%Y-%m-%d")
-
-
-def ensure_mode_dir(mode_key: str) -> str:
-    """output/<дата>/<режим>/ — создаёт при необходимости, возвращает путь."""
-    import folder_paths
-
-    mode_dir = os.path.join(folder_paths.get_output_directory(), today_folder(), mode_key)
-    os.makedirs(mode_dir, exist_ok=True)
-    return mode_dir
-
-
-def next_counter(mode_dir: str, suffix: str, ext: str) -> int:
-    """Отдельный счётчик на каждый режим: сканирует папку и берёт max+1."""
-    pattern = os.path.join(mode_dir, f"{COMPARE_STEM}_{suffix}_*.{ext}")
-    rx = re.compile(rf"{re.escape(COMPARE_STEM)}_{re.escape(suffix)}_(\d+)\.{re.escape(ext)}$")
-    max_idx = 0
-    for fp in glob.glob(pattern):
-        m = rx.search(os.path.basename(fp))
-        if m:
-            max_idx = max(max_idx, int(m.group(1)))
-    return max_idx + 1
-
-
-def resolve_source_path(filename: str, subfolder: str, img_type: str) -> str:
-    """Полный путь к уже сохранённому исходнику (temp / output / input)."""
-    import folder_paths
-
-    if img_type == "temp":
-        root = folder_paths.get_temp_directory()
-    elif img_type == "input":
-        root = folder_paths.get_input_directory()
-    else:
-        root = folder_paths.get_output_directory()
-    return os.path.join(root, subfolder, filename) if subfolder else os.path.join(root, filename)
 
 
 def open_file_in_viewer(filepath: str):
@@ -125,8 +63,8 @@ class DeggImagesSaveCompare:
 
     Save mode (по умолчанию) — Image 1 пишется в output/ с префиксом.
     Preview mode             — Image 1 пишется во временную папку (temp).
-    Image 2 всегда пишется в temp: она нужна только для сравнения (и для GIF
-    режима Blink, который собирается на бэкенде из исходников на диске).
+    Image 2 всегда пишется в temp: она нужна только для сравнения
+    (серверная сборка GIF удалена — задача T1).
     """
 
     def __init__(self):
@@ -244,7 +182,7 @@ class DeggImagesSaveCompare:
                      image_2=None, prompt=None, extra_pnginfo=None):
         import folder_paths
 
-        if mode not in MODE_FOLDER_MAP:
+        if mode not in MODES:
             mode = "Slider"
 
         ui_images = []
@@ -304,13 +242,13 @@ class DeggImagesSaveCompare:
 
 
 NODE_CLASS_MAPPINGS = {NODE_KEY: DeggImagesSaveCompare}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_KEY: "Degg Images Save_Compare"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_KEY: "Degg Images Save/Compare"}
 WEB_DIRECTORY = "web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  HTTP-роуты: открытие файла в Windows-просмотрщике + сохранение «как видишь»
+#  HTTP-роут: открытие файла в Windows-просмотрщике
 # ─────────────────────────────────────────────────────────────────────────────
 
 def register_routes():
@@ -352,120 +290,5 @@ def register_routes():
         except Exception as e:
             logger.error("[Degg Save_Compare] Ошибка открытия файла: %s", e)
             return web.json_response({"success": False, "error": str(e)}, status=500)
-
-    @routes.post("/degg_images_save_compare/save_compare")
-    async def degg_save_compare(request):
-        """
-        Принимает снимок холста (JPEG в base64) для режимов Slider /
-        Side-by-Side / Overlap / Difference и сохраняет его в
-        output/<дата>/<режим>/Degg_Compare_<суффикс>_NNNNN.jpg.
-        """
-        try:
-            data = await request.json()
-            mode = data.get("mode")
-            image_data_url = data.get("image", "")
-
-            suffix = MODE_FOLDER_MAP.get(mode)
-            if not suffix or suffix == "blink":
-                return web.json_response(
-                    {"success": False, "error": f"Недопустимый режим для этого роута: {mode}"},
-                    status=400,
-                )
-
-            if "," in image_data_url:
-                image_data_url = image_data_url.split(",", 1)[1]
-            jpg_bytes = base64.b64decode(image_data_url)
-
-            mode_dir = ensure_mode_dir(suffix)
-            idx = next_counter(mode_dir, suffix, "jpg")
-            file_name = f"{COMPARE_STEM}_{suffix}_{idx:05}.jpg"
-            file_path = os.path.join(mode_dir, file_name)
-
-            with open(file_path, "wb") as f:
-                f.write(jpg_bytes)
-
-            logger.info("[Degg Save_Compare] Сохранён снимок: %s", file_path)
-            return web.json_response({"success": True, "path": file_path, "filename": file_name})
-        except Exception as e:
-            logger.error("[Degg Save_Compare] Ошибка сохранения снимка: %s", e)
-            return web.json_response({"success": False, "error": str(e)}, status=500)
-
-    @routes.post("/degg_images_save_compare/save_blink_gif")
-    async def degg_save_blink_gif(request):
-        """
-        Собирает зацикленный GIF из двух исходников, уже сохранённых узлом при
-        выполнении схемы. Плавный кроссфейд A -> B -> A с фиксированным циклом
-        (BLINK_PHASE_MS), независимым от виджета blink_speed.
-        """
-        try:
-            from PIL import Image
-
-            data = await request.json()
-            meta1 = data.get("img1")
-            meta2 = data.get("img2")
-
-            if not meta1 or not meta2:
-                return web.json_response(
-                    {"success": False, "error": "Нужны оба изображения (Image 1 и Image 2)"},
-                    status=400,
-                )
-
-            path1 = resolve_source_path(meta1["filename"], meta1.get("subfolder", ""),
-                                        meta1.get("type", "temp"))
-            path2 = resolve_source_path(meta2["filename"], meta2.get("subfolder", ""),
-                                        meta2.get("type", "temp"))
-
-            frame_a = Image.open(path1).convert("RGB")
-            frame_b = Image.open(path2).convert("RGB")
-            if frame_b.size != frame_a.size:
-                frame_b = frame_b.resize(frame_a.size)
-
-            static_ms = round(BLINK_PHASE_MS * 2 / 3)
-            transition_ms = round(BLINK_PHASE_MS * 1 / 3)
-            n = max(1, BLINK_TRANSITION_FRAMES)
-            per_frame_ms = max(20, round(transition_ms / n))
-
-            # Общая палитра на все кадры — иначе каждый кадр квантуется отдельно
-            # и при воспроизведении видно цветовое мерцание.
-            combined = Image.new("RGB", (frame_a.width * 2, frame_a.height))
-            combined.paste(frame_a, (0, 0))
-            combined.paste(frame_b, (frame_a.width, 0))
-            shared_palette = combined.quantize(colors=256)
-
-            def to_gif_frame(img):
-                return img.quantize(palette=shared_palette, dither=Image.FLOYDSTEINBERG)
-
-            frames = [to_gif_frame(frame_a)]
-            durations = [static_ms]
-            for i in range(1, n + 1):
-                frames.append(to_gif_frame(Image.blend(frame_a, frame_b, i / (n + 1))))
-                durations.append(per_frame_ms)
-            frames.append(to_gif_frame(frame_b))
-            durations.append(static_ms)
-            for i in range(1, n + 1):
-                frames.append(to_gif_frame(Image.blend(frame_b, frame_a, i / (n + 1))))
-                durations.append(per_frame_ms)
-
-            mode_dir = ensure_mode_dir("blink")
-            idx = next_counter(mode_dir, "blink", "gif")
-            file_name = f"{COMPARE_STEM}_blink_{idx:05}.gif"
-            file_path = os.path.join(mode_dir, file_name)
-
-            frames[0].save(
-                file_path,
-                save_all=True,
-                append_images=frames[1:],
-                duration=durations,
-                loop=0,
-                disposal=2,
-            )
-
-            logger.info("[Degg Save_Compare] Сохранён Blink GIF (%d кадров): %s",
-                        len(frames), file_path)
-            return web.json_response({"success": True, "path": file_path, "filename": file_name})
-        except Exception as e:
-            logger.error("[Degg Save_Compare] Ошибка сохранения Blink GIF: %s", e)
-            return web.json_response({"success": False, "error": str(e)}, status=500)
-
 
 register_routes()
