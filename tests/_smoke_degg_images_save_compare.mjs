@@ -260,12 +260,14 @@ function makeNode() {
       return w;
     },
     // DOMWidgetImpl: элемент + options (getMinHeight/hideInPanel/...).
+    // ⚠️ Дефолт фронтенда ВОСПРОИЗВОДИМ: options: { hideOnZoom: true, ...options }
+    // (domWidget.ts:371). Без него заглушка слепа к LOD-скрытию при отдалении.
     addDOMWidget(name, type, element, options) {
       const w = {
         type: type || "dom",
         name,
         element,
-        options: options || {},
+        options: { hideOnZoom: true, ...(options || {}) },
         serialize: false,
         y: 0,
         computedHeight: undefined,
@@ -356,6 +358,22 @@ check("превью: пол виджета минус поля = пол корн
   preview && String(preview.options.margin));
 check("превью: getHeight НЕ задан (height пиннит распределение места → нет растяжения)",
   preview && preview.options.getHeight === undefined && preview.options.getMaxHeight === undefined);
+
+// ── LOD: при отдалении воркфлоу превью НЕ пропадает ───────────────────────
+// Проверено по sourcesContent фронтенда:
+//   low_quality = ds.scale < 0.6  (LGraphCanvas.ts:552; порог
+//   LiteGraph.Canvas.LowQualityRenderingZoomThreshold default 0.6,
+//   coreSettings.ts:1012) → на 56% срабатывает);
+//   addDOMWidget ставит hideOnZoom: true ПО УМОЛЧАНИЮ (domWidget.ts:371);
+//   DomWidgets.vue:91-94: visible = … && !(hideOnZoom && lowQuality) → v-show
+//   (display:none), legacy вдобавок рисует серую заглушку (domWidget.ts:170-182).
+// Стандартные превью ComfyUI явно передают hideOnZoom: false
+// (useNodeImage.ts:169, useNodeAnimatedImage.ts:34) — поэтому они видны.
+check("LOD: превью видно при отдалении (addDOMWidget получает hideOnZoom: false)",
+  preview && preview.options && preview.options.hideOnZoom === false,
+  preview && preview.options ? String(preview.options.hideOnZoom) : "нет options");
+check("LOD: формула видимости фронтенда даёт visible=true при low_quality",
+  preview && preview.options && !(preview.options.hideOnZoom && true));
 
 check("превью: applyMode существует (режимы переключает DOM-слой)", typeof DSC.applyMode === "function");
 const st = DSC.ensureState(node);
@@ -1007,6 +1025,95 @@ check("п.1: Slider — Alt+wheel форвардится графу",
   && !!mainCanvasEl.lastDispatched && mainCanvasEl.lastDispatched.type === "wheel",
   `count=${mainCanvasEl.dispatchCount - fwdSlider0}`);
 setMode("Side-by-Side");
+
+// ── п.1: средняя кнопка ПРОВОДИТ панораму графа во всех режимах, кроме
+// внутренней панорамы SBS (баг: в Off/Slider pointerdown(button1) уходил в
+// никуда — в legacy DomWidgets сосед канвы, и без форварда канва графа
+// событие не получает; колесо уже форвардилось forwardWheelToCanvas, а
+// pointer-события — нет).
+setMode("Off");
+st.zoom = 1; st.panX = 0; st.panY = 0; st.panDrag = false;
+mainCanvasEl.lastDispatched = null;
+const fwdMid0 = mainCanvasEl.dispatchCount;
+let midPrevented = false, midStopped = false;
+stage.dispatch("pointerdown", {
+  button: 1, buttons: 4, pointerId: 7, clientX: 400, clientY: 200,
+  preventDefault() { midPrevented = true; },
+  stopPropagation() { midStopped = true; },
+});
+const midEv = mainCanvasEl.lastDispatched;
+check("п.1: Off — pointerdown средней кнопки форвардится на канву графа",
+  mainCanvasEl.dispatchCount > fwdMid0 && !!midEv
+  && midEv.type === "pointerdown" && midEv.button === 1 && midEv.pointerId === 7,
+  `count=${mainCanvasEl.dispatchCount - fwdMid0} last=${midEv && midEv.type}`);
+check("п.1: Off — оригинальное событие погашено (preventDefault + stopPropagation)",
+  midPrevented === true && midStopped === true, `${midPrevented}/${midStopped}`);
+check("п.1: Off — средняя кнопка не включает панораму превью",
+  st.panDrag === false, String(st.panDrag));
+
+// move с зажатой средней кнопкой — фолбэк-форвард, если канва не захватила
+// указатель (CanvasPointer.setPointerCapture живёт только в браузере)
+mainCanvasEl.lastDispatched = null;
+const fwdMoveMid0 = mainCanvasEl.dispatchCount;
+stage.dispatch("pointermove", { button: -1, buttons: 4, pointerId: 7, clientX: 380, clientY: 190 });
+const moveMidEv = mainCanvasEl.lastDispatched;
+check("п.1: Off — pointermove с зажатой средней форвардится графу",
+  mainCanvasEl.dispatchCount > fwdMoveMid0 && !!moveMidEv
+  && moveMidEv.type === "pointermove" && moveMidEv.buttons === 4,
+  `count=${mainCanvasEl.dispatchCount - fwdMoveMid0} last=${moveMidEv && moveMidEv.type}`);
+
+mainCanvasEl.lastDispatched = null;
+const fwdUpMid0 = mainCanvasEl.dispatchCount;
+stage.dispatch("pointerup", { button: 1, buttons: 0, pointerId: 7, clientX: 380, clientY: 190 });
+const upMidEv = mainCanvasEl.lastDispatched;
+check("п.1: Off — pointerup средней кнопки форвардится графу",
+  mainCanvasEl.dispatchCount > fwdUpMid0 && !!upMidEv
+  && upMidEv.type === "pointerup" && upMidEv.button === 1,
+  `count=${mainCanvasEl.dispatchCount - fwdUpMid0} last=${upMidEv && upMidEv.type}`);
+
+// левая кнопка — наша (клик по ноде/шторке), графу не уходит
+mainCanvasEl.lastDispatched = null;
+stage.dispatch("pointerdown", { button: 0, buttons: 1, clientX: 1, clientY: 1 });
+check("п.1: Off — левая кнопка НЕ форвардится графу",
+  mainCanvasEl.lastDispatched === null,
+  String(mainCanvasEl.lastDispatched && mainCanvasEl.lastDispatched.type));
+st.panDrag = false;
+
+// Slider: средняя кнопка проводит событие графу и не двигает шторку
+setMode("Slider");
+const sliderPosMid = st.sliderPos;
+mainCanvasEl.lastDispatched = null;
+stage.dispatch("pointermove", { button: -1, buttons: 4, pointerId: 7, clientX: 5, clientY: 5 });
+check("п.1: Slider — средняя кнопка форвардится графу и не двигает шторку",
+  !!mainCanvasEl.lastDispatched && mainCanvasEl.lastDispatched.type === "pointermove"
+  && st.sliderPos === sliderPosMid,
+  `type=${mainCanvasEl.lastDispatched && mainCanvasEl.lastDispatched.type} pos=${st.sliderPos}/${sliderPosMid}`);
+
+// Nodes 2.0: guard-предок обязан проводить среднюю кнопку тем же форвардом
+setMode("Off");
+gStopped = false;
+mainCanvasEl.lastDispatched = null;
+const fwdGuardMid0 = mainCanvasEl.dispatchCount;
+gEl.dispatch("pointerdown", gEv({ button: 1, buttons: 4 }));
+const gMidEv = mainCanvasEl.lastDispatched;
+check("п.1: 2.0 — средняя кнопка через guard-предка форвардится графу",
+  mainCanvasEl.dispatchCount > fwdGuardMid0 && !!gMidEv
+  && gMidEv.type === "pointerdown" && gMidEv.button === 1 && gStopped === true,
+  `count=${mainCanvasEl.dispatchCount - fwdGuardMid0} last=${gMidEv && gMidEv.type} stopped=${gStopped}`);
+check("п.1: 2.0 — guard не включает панораму превью в Off",
+  st.panDrag === false, String(st.panDrag));
+
+// SBS с двумя кадрами при зуме >1: средняя кнопка — НАША панорама,
+// графу не уходит (особая функция режима сохраняется)
+setMode("Side-by-Side");
+st.zoom = 2; st.panX = 0; st.panY = 0;
+mainCanvasEl.lastDispatched = null;
+stage.dispatch("pointerdown", { button: 1, buttons: 4, clientX: 400, clientY: 200 });
+check("п.1: SBS (зум>1) — средняя кнопка НЕ форвардится графу (внутренняя панорама)",
+  mainCanvasEl.lastDispatched === null && st.panDrag === true,
+  `last=${mainCanvasEl.lastDispatched && mainCanvasEl.lastDispatched.type} panDrag=${st.panDrag}`);
+stage.dispatch("pointerup", { button: 1, buttons: 0, clientX: 400, clientY: 200 });
+st.zoom = 1; st.panX = 0; st.panY = 0; st.panDrag = false;
 
 // Без подключённых картинок навигации нет — сравнивать нечего.
 const navNode = makeNode();

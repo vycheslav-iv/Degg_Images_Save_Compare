@@ -134,6 +134,7 @@ else if (w.computeLayoutSize) growableWidgets.push({...})   // ← сюда по
 | Blend на КОРОБКЕ слоя, не на `<img>` | `<img>` лежит внутри `scene` (transform/will-change → stacking context), а stacking context изолирует mix-blend-mode — на `<img>` режим Difference смешивался только с пустотой сцены и не работал (регрессия DOM-переписывания, поймана красным тестом) |
 | Без `z-index` | порядок слоёв — DOM-порядок (`appendChild` переносит узел): `z-index` создаёт stacking context и сломал бы `mix-blend-mode` |
 | Панель свойств | `hideInPanel: true` — иначе панель пишет `widget.width` и сжимает превью |
+| **Не пропадает при отдалении (LOD)** | `hideOnZoom: false` в опциях `addDOMWidget` — иначе при `ds.scale < 0.6` включается `low_quality` и фронтенд скрывает DOM-виджет; превью пропадало уже на 56% (§4.7) |
 | Ширина в Vue | `[data-node-id]` → `style.minWidth`, повторно через один `requestAnimationFrame` (Vue монтирует ноду асинхронно) |
 | Запрещённые приёмы | нет `setInterval`, `MutationObserver`, `scrollHeight`/`offsetHeight`, нет перехвата `proto.computeSize`/`node.onMouseMove`, нет глобальных слушателей |
 
@@ -256,6 +257,70 @@ JSON, `onExecuted` повторно **не вызывается** — слоты
 - `setSlotImage` ставит `onerror`/`onload` и состояние **до** `img.src`: кэш
   может ответить синхронно, и проверка `st.img1 === img` по старому значению не
   сработала бы — битый слой остался бы в срезе.
+
+### 4.7. ⭐ Превью не пропадает при отдалении воркфлоу (LOD)
+
+**Симптом:** при уменьшении воркфлоу примерно на **56%** превью исчезает,
+тогда как стандартные ноды ComfyUI остаются видимыми.
+
+**Механика (всё из `sourcesContent` `.map` фронтенда):**
+
+| Шаг | Файл | Что происходит |
+|---|---|---|
+| 1. Порог | `LGraphCanvas.ts:552` | `this._isLowQuality = this.ds.scale < this._lowQualityZoomThreshold` |
+| 2. Порог по умолчанию | `coreSettings.ts:1012` | `LiteGraph.Canvas.LowQualityRenderingZoomThreshold` = **0.6** → 56% уже «low quality» |
+| 3. Дефолт виджета | `domWidget.ts:371` | `addDOMWidget` создаёт виджет с `options: { hideOnZoom: true, ...options }` — **true по умолчанию** |
+| 4. Скрытие | `DomWidgets.vue:91-94` | `widgetState.visible = isInCorrectGraph && nodeVisible && !(hideOnZoom && lowQuality)` → `v-show` → `display:none` |
+| 5. Legacy | `domWidget.ts:170-182` | поверх того рисуется **серая заглушка** вместо содержимого |
+| 6. Почему стандартные ноды видны | `useNodeImage.ts:169`, `useNodeAnimatedImage.ts:34` | они явно передают `hideOnZoom: false` |
+
+**Лечение:** явный `hideOnZoom: false` в опциях `addDOMWidget` превью.
+
+⛔ Удалять эту опцию нельзя — без неё дефект возвращается ровно тем же способом
+(поймано проверками §7 и мутацией «удалить `hideOnZoom: false`» → RED).
+
+**Почему это не поймал обычный смоук:** заглушка фронтенда в тесте сохраняла
+`options` как есть и **не воспроизводила дефолт** `{hideOnZoom: true, ...}` —
+поэтому проверка не могла увидеть скрытие. Заглушка обязана повторять семантику
+слоя, который ломается (см. `comfyui-mutation-testing`, §5 скила
+`comfyui-combo-protocol-values` там же про `options.values`).
+
+### 4.8. ⭐ Средняя кнопка мыши — панорама воркфлоу (во всех режимах)
+
+**Симптом:** колесо над превью работало, а перемещение воркфлоу средней
+кнопкой — нет: в Off/Slider/одиночных видах `pointerdown` с `button === 1`
+уходил в пустой `return`, событие не доходило до канвы графа.
+
+**Причина (legacy-режим):** `DomWidgets` — **сосед** канвы, а не потомок,поэтому событие со stage до канвы физически не доходит; колесо спасал
+`forwardWheelToCanvas`, а pointer-события никто не форвардил.В Nodes 2.0 транспорт есть (`GraphCanvas.vue` → `TransformPane`
+`@pointerdown.capture` → `forwardEventToCanvas`), но полагаться толькона него нельзя — поведение обязано быть одинаковым в обоих режимах.
+
+**Лечение — `forwardPointerToCanvas(e)`** (зеркало `forwardEventToCanvas`из `useCanvasInteractions.ts`, правки §4.3):
+
+| Где | Поведение |
+|---|---|
+| `stage pointerdown` (`button === 1`) | внутренняя панорама — только `navEnabled && zoom > 1` (SBS с парой); иначе форвард на `app.canvas.canvas` синтетическим `new PointerEvent(e.type, e)` |
+| `stage pointermove` (`(buttons & 4) === 4`) | форвард, если не тянем свою панораму (страховка: без захвата указателя) |
+| `stage pointerup` (`button === 1 && !panDrag`) | доносим окончание drag-а графу |
+| capture-guard `onPointerDown` (Nodes 2.0) | тот же форвард выше TransformPane; `stopPropagation` исключает двойной форвард |
+
+Всегда: `preventDefault` + `stopPropagation` оригинала ДО диспатча (как в
+официальном `forwardEventToCanvas`). Левая кнопка не форвардится никогда
+(клик по ноде/шторке — наш). В SBS при зуме > 1 средняя кнопка — внутренняя
+панорама кадров, графу не уходит; при зуме 1 (панорировать нечего) — уходит
+графу, как это уже делает TransformPane во Vue-режиме.
+
+Почему в браузере достаточно форвардить `pointerdown`: канва на pointerdown
+вызывает `CanvasPointer.down()` → `element.setPointerCapture(pointerId)`
+(`CanvasPointer.ts:192`) и дальше сама принимает `move`/`up`. Наши
+`move`/`up`-форварды — страховка, когда захвата не было.
+
+Alt+wheel — **особая функция Side-by-Side** (зум превью), без изменений:
+в остальных режимах колесо и средняя кнопка принадлежат графу.
+
+⛔ Проверки: smoke «п.1: Off/Slider/2.0/SBS — средняя кнопка…», audit
+«forwardPointerToCanvas…» (§7). Мутации «убран форвард down/move/up/guard» и
+«форвард безусловный (съел SBS)» → RED.
 
 ## 5. Локализация (RU/EN)
 

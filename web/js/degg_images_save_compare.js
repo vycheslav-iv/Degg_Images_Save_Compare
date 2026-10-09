@@ -48,7 +48,7 @@
 //
 // Запуск тестов: cd Degg_Images_Save_Compare && node tests/_smoke_*.mjs
 
-const DSC_JS_VERSION = "2.14.0-wheel-fwd-viewpair";
+const DSC_JS_VERSION = "2.15.0-midbtn-pan-fwd";
 console.log(`[Degg_Images_Save_Compare] JS ${DSC_JS_VERSION} loaded`);
 
 // ── bootstrap (Nodes 2.0: только window.comfyAPI) ──────────────────────────
@@ -1277,6 +1277,51 @@ function forwardWheelToCanvas(e) {
   }
 }
 
+/**
+ * П.1: средняя кнопка мыши — панорама воркфлоу. Вне внутренней панорамы
+ * Side-by-Side событие принадлежит графу. В legacy-режиме DomWidgets — сосед
+ * канвы, поэтому событие до неё не доходит: форвардим синтетическое
+ * pointer-событие на app.canvas.canvas (как forwardEventToCanvas во
+ * Vue-режиме). Канва на pointerdown вызывает setPointerCapture
+ * (CanvasPointer.down) и дальше сама принимает move/up. Возвращает true,
+ * если событие ушло в канву.
+ */
+function forwardPointerToCanvas(e) {
+  try {
+    const app = pickApp();
+    const canvasEl = app && app.canvas && app.canvas.canvas;
+    if (!canvasEl || typeof canvasEl.dispatchEvent !== "function") return false;
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+    let ev;
+    if (typeof PointerEvent === "function") {
+      ev = new PointerEvent(e.type, e);
+    } else {
+      // Фолбэк для сред без конструктора PointerEvent (песочница смоук-теста)
+      ev = {
+        type: e.type,
+        bubbles: true,
+        cancelable: true,
+        pointerId: e.pointerId,
+        isPrimary: e.isPrimary !== false,
+        pointerType: e.pointerType || "mouse",
+        button: e.button,
+        buttons: e.buttons,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        altKey: !!e.altKey,
+        ctrlKey: !!e.ctrlKey,
+        metaKey: !!e.metaKey,
+        shiftKey: !!e.shiftKey,
+      };
+    }
+    canvasEl.dispatchEvent(ev);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 function bindPreviewEvents(node) {
   const st = ensureState(node);
   if (!st.dom) return;
@@ -1316,14 +1361,17 @@ function bindPreviewEvents(node) {
     hideHelp(node);
     syncMode(node);
     if (e.button === 1) {
-      // средняя кнопка: панорама (нужен зум; только при сравнении двух кадров)
-      if (!navEnabled(node)) return;
-      if (st.zoom > 1.0) {
-        st.panDrag = true;
-        st.lastPan = [num(e.clientX, 0), num(e.clientY, 0)];
-        if (typeof stage.setPointerCapture === "function") stage.setPointerCapture(e.pointerId);
-        e.preventDefault();
+      // средняя кнопка: внутренняя панорама — только SBS с видимой парой и
+      // зумом >1; во всех остальных режимах событие панорамит ГРАФ (баг:
+      // уходило в никуда — DomWidgets сосед канвы, форварда не было)
+      if (!(navEnabled(node) && st.zoom > 1.0)) {
+        forwardPointerToCanvas(e);
+        return;
       }
+      st.panDrag = true;
+      st.lastPan = [num(e.clientX, 0), num(e.clientY, 0)];
+      if (typeof stage.setPointerCapture === "function") stage.setPointerCapture(e.pointerId);
+      e.preventDefault();
       return;
     }
     if (e.button !== 0) return;
@@ -1351,13 +1399,23 @@ function bindPreviewEvents(node) {
       applyTransforms(node);
       return;
     }
+    // средняя кнопка, которую мы не тянем сами, — панорама графа
+    // (фолбэк, если канва не захватила указатель на pointerdown)
+    if ((e.buttons & 4) === 4) {
+      forwardPointerToCanvas(e);
+      return;
+    }
     if (currentMode(node) === "Slider") setSliderFromClientX(node, e.clientX);
   });
 
+  stage.addEventListener("pointerup", (e) => {
+    // канва не получила pointerdown/up (legacy-сосед) — доносим up графу
+    if (e.button === 1 && !st.panDrag) forwardPointerToCanvas(e);
+    st.panDrag = false;
+  });
   const endDrag = () => {
     st.panDrag = false;
   };
-  stage.addEventListener("pointerup", endDrag);
   stage.addEventListener("pointercancel", endDrag);
 
   stage.addEventListener("dblclick", (e) => {
@@ -1422,9 +1480,13 @@ function bindGuardEvents(node) {
   const onPointerDown = (e) => {
     if (!inside(e)) return;
     if (e.button !== 1) return;
-    if (!navEnabled(node)) return;    // навигация — только при сравнении двух кадров
     const st2 = ensureState(node);
-    if (!(st2.zoom > 1.0)) return;    // средняя кнопка при обычном виде — графу
+    if (!(navEnabled(node) && st2.zoom > 1.0)) {
+      // вне внутренней панорамы (SBS + зум) средняя кнопка панорамит граф;
+      // форвард выше TransformPane — поведение не зависит от режима рендеринга
+      forwardPointerToCanvas(e);
+      return;
+    }
     hideHelp(node);
     syncMode(node);
     st2.panDrag = true;
@@ -1504,6 +1566,13 @@ function addPreviewWidget(node) {
   const root = buildPreviewDom(node);
   if (typeof node.addDOMWidget === "function") {
     node.addDOMWidget(PREVIEW_WIDGET, "degg_compare_view", root, {
+      // ⛔ НЕ УДАЛЯТЬ: addDOMWidget ставит hideOnZoom: true по умолчанию
+      // (domWidget.ts:371), а при ds.scale < 0.6 включается low_quality
+      // (LGraphCanvas.ts:552, порог LiteGraph.Canvas.LowQualityRenderingZoom
+      // Threshold = 0.6) и DomWidgets.vue:91-94 делает виджет невидимым
+      // (v-show) — превью пропадало уже на 56%. Стандартные превью ComfyUI
+      // поэтому явно передают false (useNodeImage.ts:169).
+      hideOnZoom: false,
       serialize: false,
       hideInPanel: true,
       margin: PREVIEW_MARGIN,

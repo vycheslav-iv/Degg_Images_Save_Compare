@@ -156,6 +156,13 @@ check("js: help-box рамка монохромная (нет sky-акцента
   check("js: canvasOnly:true НЕ выставляется в коде",
     !/canvasOnly\s*:\s*true/.test(JSC));
   has(JS, /hideInPanel:\s*true/, "js: hideInPanel:true (панель свойств не перепишет widget.width)");
+  // LOD: при отдалении (ds.scale < 0.6) фронтенд скрывает DOM-виджеты с
+  // hideOnZoom — причём addDOMWidget ставит true ПО УМОЛЧАНИЮ (domWidget.ts:371),
+  // поэтому без явного false превью исчезает на 56%, а стандартные ноды
+  // (useNodeImage.ts:169) остаются видны. Нужен явный false.
+  has(JSC, /hideOnZoom:\s*false/,
+    "js: превью явно снимает hideOnZoom (иначе LOD скрывает его при отдалении)");
+  check("js: hideOnZoom:true нигде не выставляется", !/hideOnZoom\s*:\s*true/.test(JSC));
   has(JS, /serialize:\s*false/, "js: serialize:false");
   has(JS, /expandToFitContent/, "js: размер ноды догоняет сумму виджетов");
 
@@ -245,10 +252,34 @@ check("js: help-box рамка монохромная (нет sky-акцента
     "js: навигация только при сравнении двух кадров (navEnabled)");
   has(JS, /function navEnabled\(node\)[\s\S]{0,300}currentMode\(node\) !== "Side-by-Side"/,
     "js: navEnabled требует режим Side-by-Side (навигация только в SBS)");
-  check("js: зум/панорама закрыты при одном изображении (гейты navEnabled)",
-    (JSC.match(/if \(!navEnabled\(node\)\) return;/g) || []).length >= 3
+  // Контракт обновлён задачей «средняя кнопка панорамит граф»: раньше навигация
+  // закрывалась bare-return-ами (событие терялось), теперь НЕвнутренняя
+  // панорама форвардится на канву (см. блок forwardPointerToCanvas ниже).
+  // Bare-гейт остался у capture-wheel (навигация — только при сравнении пары).
+  check("js: зум закрыт при одном изображении (гейты navEnabled)",
+    (JSC.match(/if \(!navEnabled\(node\)\) return;/g) || []).length >= 1
     && /if \(e\.altKey && navEnabled\(node\)\)/.test(JSC),
     `bare=${(JSC.match(/if \(!navEnabled\(node\)\) return;/g) || []).length}`);
+
+  // П.1 (средняя кнопка): во всех режимах, кроме внутренней панорамы SBS,
+  // pointer-события форвардятся на канву графа (в legacy DomWidgets — сосед
+  // канвы, и без форварда событие до неё не доходит: панорама воркфлоу не
+  // работала, в отличие от колеса).
+  check("js: форвард pointer-событий на канву графа (forwardPointerToCanvas)",
+    /function forwardPointerToCanvas/.test(JSC));
+  check("js: форвард уходит на app.canvas.canvas синтетическим PointerEvent",
+    /new PointerEvent\(e\.type,\s*e\)/.test(JSC)
+    && /dispatchEvent\(ev\)/.test(JSC)
+    && /pickApp\(\)/.test(JSC));
+  check("js: pointerdown средней кнопки без внутренней панорамы — форвард графу",
+    /if \(e\.button === 1\)[\s\S]{0,600}forwardPointerToCanvas\(e\)/.test(JSC)
+    && /navEnabled\(node\) && st2?\.zoom > 1\.0/.test(JSC));
+  check("js: pointermove с зажатой средней кнопкой (buttons & 4) форвардится графу",
+    /\(e\.buttons & 4\) === 4[\s\S]{0,160}forwardPointerToCanvas\(e\)/.test(JSC));
+  check("js: pointerup средней кнопки форвардится только когда не тянули своё",
+    /e\.button === 1 && !st\.panDrag[\s\S]{0,120}forwardPointerToCanvas\(e\)/.test(JSC));
+  check("js: capture-guard тоже форвардит среднюю кнопку (Nodes 2.0, не зависим от TransformPane)",
+    /onPointerDown\s*=\s*\(e\)\s*=>[\s\S]{0,700}forwardPointerToCanvas\(e\)/.test(JSC));
 
   // П.1: колесо без Alt (и alt+wheel при выключенной навигации) — на канву графа.
   has(JS, /function forwardWheelToCanvas/, "js: форвард wheel на канву графа (forwardWheelToCanvas)");
