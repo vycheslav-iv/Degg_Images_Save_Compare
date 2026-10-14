@@ -6,7 +6,12 @@
 ---
 
 ## 1. Что делали в этой сессии (кратко)
-
+- Форвард pointer-событий на канву графа (средняя кнопка панорамирует воркфлоу во всех режимах, кроме внутренней панорамы SBS): `forwardPointerToCanvas(e)` — зеркало `forwardEventToCanvas` из `useCanvasInteractions.ts`, синтетический `PointerEvent` на `app.canvas.canvas`, `preventDefault+stopPropagation` на оригинале ДО диспатча.
+- Добавлены проверки §4.7 (LOD: `hideOnZoom:false`, иначе превью пропадает на 56% — дефолт `addDOMWidget` true, порог 0.6) и §4.8 (средняя кнопка).
+- Обновлены `check.json` (описания), `tests/_smoke_degg_images_save_compare.mjs` (+10 проверок п.1: Off/Slider/2.0/SBS — форвард down/move/up, prevention/propagation, левая кнопка не форвардится, SBS-исключение), `tests/_audit_degg_images_save_compare.mjs` (+6 статических проверок; контракт навигации переписан с bare-gates на форвард с обоснованием).
+- Версия `DSC_JS_VERSION`: `2.14.0-wheel-fwd-viewpair` → `2.15.0-midbtn-pan-fwd`.
+- Красная база до правки: smoke FAIL 247/6, audit FAIL 241/6. Мутации M1–M5 → RED.
+- Закоммичено и запушено: `c4c5b6b` + push в `origin/master`.
 - **Локализация ноды**: русский интерфейс ComfyUI → RU, любой другой → EN.
   Предыдущая модель сломала ноду (превью перестало появляться) — выполнен откат
   рабочей копии из чистого исходника, затем переписано правильно.
@@ -26,24 +31,16 @@
 
 ## 2. Итоговое состояние кода
 
-- `web/js/degg_images_save_compare.js` (`DSC_JS_VERSION` js:51 — не менялся):
-  - `readComfyLocale()` js:99 — `app.extensionManager.setting.get("Comfy.Locale")`
-    → фолбэк `app.ui.settings.getSettingValue` → `navigator.language`;
-  - `isRu()` js:123 (`/^ru/i`), `setLocaleOverride(v)` js:128 — тестовый вход;
-  - `MODES` js:193 и `currentMode()` js:401 — **протокол, не трогать**;
-  - `MODE_LABELS_RU` js:201, `modeLabel()` js:211 — RU-подписи
-    (Выкл./Шторка/Сбоку/Наложение/Разница/Мигание);
-  - `hookModeWidgets` js:1561 → `w.options.getOptionLabel = (v) => modeLabel(v)`
-    js:1570 (только для `mode`; слайдерам — `options.slider_color = "#666"`).
-  - RU-строки превью: `VIEW_TITLES_RU` js:174, `viewItems()` js:177,
-    `openLabelReady/Empty` js:190, `helpItems()` js:297, `hintText()` js:300;
-    EN-константы исходно английские.
-- `degg_images_save_compare.py` — все `tooltip` и `DESCRIPTION` **по-английски**
-  (EN-источник; для локали без файла фронтенд отдаёт backend-текст).
-- `locales/en/nodeDefs.json` и `locales/ru/nodeDefs.json` — по 41 строке:
-  `display_name`, `description`, `inputs.*.name|tooltip` (7 слотов),
-  `outputs.0.name`.
-- Тесты: python **57/0**, smoke **241/0**, audit **239/0**; `check.py` — провалов 0.
+- `web/js/degg_images_save_compare.js` (`DSC_JS_VERSION` js:51 — `2.15.0-midbtn-pan-fwd`):
+  - `forwardPointerToCanvas(e)` js:1289 — форвард pointer-событий на `app.canvas.canvas` (зеркало `forwardEventToCanvas`, `preventDefault+stopPropagation` на оригинале ДО диспатча).
+  - `bindPreviewEvents` — stage `pointerdown`/`pointermove`/`pointerup`: средняя кнопка → форвард, кроме внутренней панорамы SBS (`navEnabled && zoom > 1`).
+  - `bindGuardEvents` (`canvasGuardEl`/`onPointerDown`, Nodes 2.0, js:1487) — capture-guard тем же форвардом выше TransformPane; не зависит от режима рендера.
+  - `addPreviewWidget` (`hideOnZoom:false`, js:1566) — снят дефолт `addDOMWidget`, иначе превью пропадает на 56% (LOD).
+  - `SPECIFICATION.md` §4.7 (LOD) и §4.8 (средняя кнопка) — документация контракта.
+- `degg_images_save_compare.py` — все `tooltip` и `DESCRIPTION` **по-английски** (EN-источник; для локали без файла фронтенд отдаёт backend-текст).
+- `locales/en/nodeDefs.json` и `locales/ru/nodeDefs.json` — по 41 строке: `display_name`, `description`, `inputs.*.name|tooltip` (7 слотов), `outputs.0.name`.
+- Тесты: python **57/0**, smoke **253/0**, audit **247/0**; `check.py` — провалов 0 (предупреждение `предохранитель git` — предсуществующее).
+- Bundle-root скил `.agents/skills/comfyui-js-extension/SKILL.md` (+ зеркала `.kilo/`, `.opencode/`) — добавлен раздел «Форвард событий на канву графа» (3 зеркала идентичны по содержимому нового раздела).
 
 ## 3. Проблемы, которые встречались (и как решали)
 
@@ -60,6 +57,15 @@
 - `git diff` по аудиту показывал 865 строк вместо 91 → в файле был `\r\r\n`
   (смешанные окончания). Вычищено до LF, staged diff стал 91/0. Если увидишь
   полную перезапись файла в diff — сначала смотри на окончания строк.
+- Средняя кнопка не панорамировала мир в Off/Slider/одиночных видах: legacy
+  DomWidgets — сосед канвы, pointerdown(button===1) уходил в пустой return;
+  колесо спасал `forwardWheelToCanvas`, pointer-события не форвардились. В
+  Nodes 2.0 TransformPane capture есть, но поведение должно быть одинаковым в
+  обоих режимах → `forwardPointerToCanvas` эксплицитен.
+- Контракт навигации переписан с bare-return-гейтов на форвард: навигация
+  закрыта только в capture-wheel (Alt+wheel) и там, где нет сравнения двух
+  кадров (`navEnabled` false) — событие в остальных случаях уходит графу,
+  а не теряется.
 
 ## 4. Что важно не сломать при продолжении работы
 
@@ -75,6 +81,15 @@
   `rgba(24,24,28,0.75)`, `dim2 display none` в Off.
 - `check.json`: ровно 3 проверки, **expect-строки не менять**.
 - `sync.py` не копирует `tests/` — тесты живут только в исходнике.
+- `hideOnZoom: false` в `addPreviewWidget` не удалять: дефолт `addDOMWidget`
+  true, при `ds.scale < 0.6` (`LGraphCanvas.ts:552`, порог
+  `LiteGraph.Canvas.LowQualityRenderingZoomThreshold = 0.6`) превью скрывается.
+- `forwardPointerToCanvas` — точечный, без `if(true)/if(false)`; ровно 5
+  вызовов в коде + определение.
+- SBS-исключение: при `navEnabled && zoom > 1` средняя кнопка — внутренняя
+  панорама кадров, графу не уходит; при зуме 1 — уходит графу.
+- Левая кнопка (`button===0`) никогда не форвардится.
+- Alt+wheel — особая функция SBS (зум превью), без изменений.
 
 ## 5. Следующие шаги (идеи, не сделано)
 
@@ -85,12 +100,19 @@
 - Скилы и `AGENTS.md` лежат **вне git** (корень бандла не репозиторий,
   `git init` запрещён) — не коммитятся, не восстанавливаются.
 - `[warn] предохранитель git` в `check.py` — предсуществующий.
+- Можно закоммитить и запушить bundle-root скил `comfyui-js-extension`
+  (добавлен раздел «Форвард событий на канву графа»), если есть желание
+  версионировать навыки.
+- Живая проба `forwardPointerToCanvas` после `sync.py` + перезапуск ComfyUI +
+  Hard Reload: проверить, что средняя кнопка панорамирует воркфлоу вне SBS.
 
 ## 6. Связанные файлы
 
 - `F:\AI_projects\Custom_node_ComfyUI\Degg_Images_Save_Compare\` — исходник (`.git` здесь)
 - `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Degg_Images_Save_Compare\` — рабочая копия
-- `SPECIFICATION.md` (§5 — локализация), `check.json` — обновлены под эту сессию
+- `SPECIFICATION.md` (§4.7 LOD, §4.8 средняя кнопка), `check.json` — обновлены под эту сессию
 - `SESSION_MEMORY-history/2026-10-09.md` — снапшот предыдущей памяти
+- `SESSION_MEMORY-history/2026-10-09-prev.md` — снапшот памяти до перезаписи этой сессией
 - Скилы (вне репозитория): `.agents/skills/comfyui-combo-protocol-values/`,
-  `comfyui-localization/`, `comfyui-bilingual-node/` (+ зеркала в `.kilo`, `.opencode`)
+  `comfyui-localization/`, `comfyui-bilingual-node/`, `comfyui-js-extension/`
+  (+ зеркала в `.kilo`, `.opencode`)

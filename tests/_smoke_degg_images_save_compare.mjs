@@ -1396,6 +1396,113 @@ check("локализация: возврат к EN после сброса over
 })());
 
 console.log("");
+// ── ⭐ ФОНОВЫЙ ПРОГОН: выходы возвращает фронтенд (onNodeOutputsUpdated) ──
+// Сообщение `executed` доходит до ноды ТОЛЬКО если она в АКТИВНОМ графе
+// (settingStore-*.js: getNodeByExecutionId(this.rootGraph, n)); если генерация
+// завершилась, пока пользователь был на другом воркфлоу, выход сохраняется,
+// а onExecuted не зовётся — в ноде остаётся картинка прошлого прогона.
+// Возврат: ChangeTracker.restore → restoreOutputs → app.nodeOutputs = … →
+// invokeExtensions("onNodeOutputsUpdated") — на этом хуке нода обязана догнать.
+check("фон: расширение объявляет хук onNodeOutputsUpdated",
+  typeof capturedExt.onNodeOutputsUpdated === "function");
+
+const bgNode = makeNode();
+bgNode.id = 1;
+bgNode.type = "Degg_Images_Save_Compare";
+// Нода пришла из сохранённого графа: в properties СТАРОЕ изображение.
+bgNode.properties = {
+  dsc_meta: {
+    1: { filename: "old_00001_.png", subfolder: "", type: "output", dim: "512×768" },
+    2: null,
+  },
+};
+protoHolder.onNodeCreated.call(bgNode);
+rafQueue.forEach((f) => f());
+rafQueue = [];
+protoHolder.onConfigure.call(bgNode);
+const bgs = DSC.ensureState(bgNode);
+const bgImg = (bgs.dom && bgs.dom.a && bgs.dom.a.img) || new FakeImg();
+check("фон: до возврата в превью СТАРОЕ изображение (симптом бага)",
+  !!bgs.meta1 && bgs.meta1.filename === "old_00001_.png",
+  bgs.meta1 && bgs.meta1.filename);
+
+const bgOut = {
+  degg_compare_images: [
+    { filename: "run_00009_.png", subfolder: "", type: "output", slot: 1, width: 512, height: 768 },
+  ],
+  degg_open_path: ["D:/ComfyUI/output/run_00009_.png"],
+};
+appInstance.rootGraph = { getNodeById: (id) => (String(id) === "1" ? bgNode : null) };
+let hookErr = null;
+try { capturedExt.onNodeOutputsUpdated({ "1": bgOut }); } catch (e) { hookErr = e; }
+check("фон: хук отработал без исключения", !hookErr, hookErr && hookErr.message);
+check("⭐ фон: превью переключилось на НОВОЕ изображение",
+  !!bgs.meta1 && bgs.meta1.filename === "run_00009_.png",
+  bgs.meta1 && bgs.meta1.filename);
+check("фон: новая картинка видна в DOM-слое",
+  bgImg.style.display === "" && (bgImg.src || "").indexOf("run_00009_.png") > 0, bgImg.src);
+check("фон: подпись размеров от нового прогона", bgs.dim1 === "512×768", bgs.dim1);
+check("фон: путь для кнопки открытия обновлён",
+  bgNode._dscOpenPath === bgOut.degg_open_path[0], String(bgNode._dscOpenPath));
+check("фон: метаданные записаны в properties (следующий возврат корректен)",
+  !!(bgNode.properties.dsc_meta && bgNode.properties.dsc_meta["1"]
+     && bgNode.properties.dsc_meta["1"].filename === "run_00009_.png"));
+
+// Идемпотентность: тот же выход приходит повторно (фронтенд зовёт хук на
+// каждое присваивание app.nodeOutputs) — слот перерисовывать не нужно.
+// ⚠ Замер — по РЕАЛЬНОМУ эффекту (присваиванию src на <img>), а не по
+// обёртке экспортированного setSlotImage: внутренний вызов идёт из модуля
+// напрямую, и обёртка считала бы ноль всегда (слепой детектор, мутация M3).
+let srcSets = 0;
+const srcDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(bgImg), "src");
+Object.defineProperty(bgImg, "src", {
+  configurable: true,
+  get() { return srcDesc.get.call(this); },
+  set(v) { srcSets += 1; return srcDesc.set.call(this, v); },
+});
+capturedExt.onNodeOutputsUpdated({ "1": bgOut });
+capturedExt.onNodeOutputsUpdated({ "1": bgOut });
+check("фон: повторные восстановления тех же выходов не перерисовывают слот",
+  srcSets === 0, String(srcSets));
+// Контроль прибора: ДРУГОЙ файл обязан переустановить src (иначе замер слеп).
+capturedExt.onNodeOutputsUpdated({ "1": { degg_compare_images: [
+  { filename: "run_00010_.png", subfolder: "", type: "output", slot: 1, width: 640, height: 640 }] } });
+check("фон: контроль — другой файл src переустанавливает (замер живой)",
+  srcSets === 1, String(srcSets));
+check("фон: контроль — превью показывает именно новый файл",
+  !!bgs.meta1 && bgs.meta1.filename === "run_00010_.png", bgs.meta1 && bgs.meta1.filename);
+
+// Чужой выход с тем же номером обработки: разбирать его как наш запрещено.
+const foreign = makeNode();
+foreign.id = 2;
+foreign.type = "SaveImage";
+const fst = DSC.ensureState(foreign);
+appInstance.rootGraph = { getNodeById: (id) => (String(id) === "2" ? foreign : null) };
+capturedExt.onNodeOutputsUpdated({ "2": bgOut });
+check("фон: выход чужой ноды (SaveImage) не разбирается как наш",
+  fst.meta1 === null && fst.img1 === null, JSON.stringify(fst.meta1));
+
+// id без ноды в графе (граф ещё не создан) — тихо ничего, без исключения.
+let noNodeErr = null;
+try { capturedExt.onNodeOutputsUpdated({ "999": bgOut }); } catch (e) { noNodeErr = e; }
+check("фон: id без ноды в графе не роняет хук", !noNodeErr, noNodeErr && noNodeErr.message);
+
+// Нет активного графа (граф ещё не готов) — хук молчит без исключения.
+const keepRoot = appInstance.rootGraph;
+appInstance.rootGraph = null;
+let noGraphErr = null;
+try { capturedExt.onNodeOutputsUpdated({ "1": bgOut }); } catch (e) { noGraphErr = e; }
+appInstance.rootGraph = keepRoot;
+check("фон: без активного графа хук молчит без исключения",
+  !noGraphErr, noGraphErr && noGraphErr.message);
+
+// id приходит СТРОКОЙ (Object.keys): фолбэк Number(id) обязан её найти.
+appInstance.rootGraph = { getNodeById: (id) => (typeof id === "number" ? bgNode : null) };
+bgNode._dscOpenPath = "";
+capturedExt.onNodeOutputsUpdated({ "1": { degg_open_path: ["D:/ComfyUI/output/other.png"] } });
+check("фон: строковый id находится в графе через фолбэк Number(id)",
+  bgNode._dscOpenPath === "D:/ComfyUI/output/other.png", String(bgNode._dscOpenPath));
+
 console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);
 if (errors.length) {
   errors.forEach((e) => console.log("  - " + e));

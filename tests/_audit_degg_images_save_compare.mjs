@@ -350,8 +350,11 @@ if (PY && JS) {
     JSON.stringify(uniqPy) === JSON.stringify(uniqJs) && uniqPy.length === 1,
     `py=${JSON.stringify(uniqPy)} js=${JSON.stringify(uniqJs)}`);
 
+  // ⚠ Контракт проверяем на НОВОМ имени параметра: в onExecuted/applyOutput
+  // выход ноды называется `output` (раньше `message`) — правка контракта, а не
+  // потеря проверки; смысл тот же: JS читает ключ, который отдаёт Python.
   check("js: читает ui.degg_compare_images (как отдаёт python)",
-    /message\.degg_compare_images/.test(JS) && /degg_compare_images/.test(PY));
+    /output\.degg_compare_images/.test(JS) && /degg_compare_images/.test(PY));
   check("js: читает ui.degg_open_path (как отдаёт python)",
     /degg_open_path/.test(JS) && /degg_open_path/.test(PY));
 
@@ -500,6 +503,36 @@ if (JS) {
 }
 
 console.log("");
+if (JS) {
+  // ── ⭐ ФОНОВЫЙ ПРОГОН: выходы возвращает хук onNodeOutputsUpdated ────────
+  // Сообщение `executed` доходит до ноды ТОЛЬКО в АКТИВНОМ графе
+  // (settingStore-*.js: getNodeByExecutionId(this.rootGraph, n)). Если генерация
+  // завершилась, пока пользователь был на другом воркфлоу, превью оставалось
+  // старым — догонять надо по хуку восстановления выходов.
+  has(JSC, /onNodeOutputsUpdated\s*\(outputs\)\s*\{\s*applyRestoredOutputs\(outputs\)/,
+    "js: расширение слушает onNodeOutputsUpdated и ведёт в applyRestoredOutputs");
+  has(JSC, /function applyRestoredOutputs\(outputs\)\s*\{/,
+    "js: applyRestoredOutputs(outputs) — обработчик восстановления выходов");
+  has(JSC, /function slotShows\(st, slot, item\)/,
+    "js: slotShows() — идемпотентность слота (хук зовётся на каждое восстановление)");
+  has(JSC, /if \(slotShows\(st, slot, item\)\) continue;/,
+    "js: повтор тех же выходов не перерисовывает слот (без мигания)");
+  has(JSC, /cls !== NODE_NAME && node\.type !== NODE_NAME/,
+    "js: чужие выходы (другой тип ноды) не разбираются как наши");
+  has(JSC, /findNode\(graph, id\)/,
+    "js: нода ищется в АКТИВНОМ графе по executionId (строка/локатор)");
+  has(JSC, /getNodeById\(Number\(id\)\)/,
+    "js: фолбэк Number(id) для строковых id (Object.keys приходят строками)");
+  has(JSC, /function graphRoot\(\)[\s\S]{0,160}?rootGraph/,
+    "js: активный граф из app.rootGraph (Nodes 2.0) с фолбэком app.graph");
+  check("js: onExecuted и хук восстановления — ОДНА точка правки (applyOutput)",
+    /function onExecuted\(node, message\)\s*\{\s*applyOutput\(node, message\);\s*\}/.test(JSC)
+    && /function applyOutput\(node, output\)\s*\{/.test(JSC));
+  check("js: хук восстановления не заводит глобальных слушателей/timers",
+    !/addEventListener\(`?\"?visibilitychange/.test(JSC)
+    && !/setInterval/.test(JSC));
+}
+
 console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);
 if (errors.length) {
   errors.forEach((e) => console.log("  - " + e));

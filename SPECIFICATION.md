@@ -322,6 +322,71 @@ Alt+wheel — **особая функция Side-by-Side** (зум превью)
 «forwardPointerToCanvas…» (§7). Мутации «убран форвард down/move/up/guard» и
 «форвард безусловный (съел SBS)» → RED.
 
+### 4.9. ⭐ Фоновый прогон: нода догоняет выход после возврата в воркфлоу
+
+**Симптом (со слов пользователя):** запущена генерация → пользователь ушёл на
+другой воркфлоу (или в другую закладку браузера) → генерация завершилась →
+при возврате в ноде **старое** изображение, хотя новое сохранено на диск.
+Если не уходить — превью обновляется нормально.
+
+**Механика (исходники фронтенда 1.55.17, `static/assets/settingStore-*.js`):**
+
+```js
+q.addEventListener(`executed`, ({detail:e}) => {
+  let n = tryNormalizeNodeExecutionId(e.display_node || e.node);
+  if (!n) return;
+  t.setNodeOutputsByExecutionId(n, e.output, {merge: e.merge});  // выход сохранён ВСЕГДА
+  let r = getNodeByExecutionId(this.rootGraph, n);              // ← АКТИВНЫЙ граф
+  r && r.onExecuted && r.onExecuted(e.output);                  // …а обработчик — нет
+});
+```
+
+Пока пользователь на другом воркфлоу, узла в `rootGraph` нет — `onExecuted`
+**не вызывается вообще** (проверено живой пробой), и в ноде остаётся картинка
+прошлого прогона. Выход при этом лежит в
+`queuedJobs[prompt_id].workflow.changeTracker.nodeOutputs`.
+
+Возврат к воркфлоу — `ChangeTracker.restore()`:
+
+```js
+restore(){ …, this.nodeOutputs && _N().restoreOutputs(this.nodeOutputs), … }
+// restoreOutputs → app.nodeOutputs = snapshotOutputs()
+// set nodeOutputs(e){ … invokeExtensions(`onNodeOutputsUpdated`, e) }
+```
+
+**Лечение:** расширение слушает `onNodeOutputsUpdated(outputs)` — карту
+`executionId → output` для всего графа — и прогоняет выходы нашей ноды через ту
+же `applyOutput()`, что и `onExecuted`. Тем же хуком возвращают свои виджеты
+штатные расширения фронтенда (`PreviewAny`, `Preview3D`, `PreviewAudio`,
+`SaveGLB`), т.е. это официальный путь, а не обход.
+Механика, паттерн и ловушки вынесены в скилл `comfyui-background-run-catchup`
+(`.agents/skills/comfyui-background-run-catchup/SKILL.md`).
+
+| Требование | Как выполнено |
+|---|---|
+| Гейт по типу ноды | `cls !== NODE_NAME && node.type !== NODE_NAME → continue`: карта приходит для ВСЕГО графа, чужие id совпадают с нашими |
+| Поиск ноды | `graphRoot()` = `app.rootGraph \|\| app.graph` (Nodes 2.0/legacy) + `findNode(graph, id)` c фолбэком `Number(id)` — `Object.keys` даёт строки |
+| Одна точка правки | `onExecuted(node, message)` → `applyOutput(node, output)`; хук → `applyRestoredOutputs(outputs)` → `applyOutput(node, …)` |
+| Идемпотентность | `slotShows(st, slot, item)` — хук зовётся на КАЖДОЕ присваивание `app.nodeOutputs`; без проверки превью мигало бы при каждом восстановлении |
+| Без новых слушателей | ни `window`/`document`-слушателей, ни timers — только хук расширения |
+
+⛔ **Почему нельзя было обойтись `visibilitychange`/таймером:** у ноды нет
+глобальных слушателей (§4.2), а момент «вернулся в воркфлоу» знает только
+сам фронтенд — он и сообщает его хуком.
+
+**Проверки:**
+
+| Проверка | Что меряет |
+|---|---|
+| `tests/_probe_live_switch.py` (**живая**, вне `check.py`) | реальный сценарий: `ChangeTracker.deactivate()` → другой граф активен → `executed` не доходит до ноды → возврат (`loadGraphData` из `activeState` + `ChangeTracker.restore()`) → фронтенд вызывает наш хук (`calls=[0,0,1]`) → превью переключается на НОВЫЙ файл. Красная база до правки: **FAIL: 2** (превью остаётся старым) |
+| smoke «фон: …» (13 проверок) | хук объявлен/идемпотентен/гейтит чужие ноды/находит строковый id; замер — по РЕАЛЬНОМУ присваиванию `src` (+контроль прибора) |
+| audit «js: расширение слушает onNodeOutputsUpdated…» | статический контракт хука, гейт, фолбэк `Number(id)`, одна точка правки |
+| Мутации M1 (хук не зарегистрирован), M2 (снят гейт), M4 (`findNode` off), M3/M5 (снята идемпотентность) | все → RED |
+
+⚠️ В пробе один шаг — зеркало кода фронтенда: запись в
+`changeTracker.nodeOutputs` (её делает обработчик `executed`, а он требует
+настоящего queued-прогона). Всё остальное — реальные вызовы фронтенда.
+
 ## 5. Локализация (RU/EN)
 
 **Требование:** русский интерфейс ComfyUI → RU, любой другой язык → EN.
@@ -411,6 +476,10 @@ python tests/_test_degg_images_save_compare.py   # → FAIL: 0 / ТЕСТ ПРО
 node tests/_smoke_degg_images_save_compare.mjs   # → SMOKE OK
 node tests/_audit_degg_images_save_compare.mjs   # → аудит чист (CRLF-устойчивый: read() нормализует \r\n)
 python ../_process/check.py Degg_Images_Save_Compare
+
+# живые пробы (вне check.py — нужен запущенный ComfyUI + Chrome):
+python tests/_probe_live_switch.py              # фоновый прогон: хук onNodeOutputsUpdated (§4.9)
+python tests/_probe_live_dom.py                 # DOM-аудит живого узла
 ```
 
 Что проверяет аудит/смоук по локализации (§5):

@@ -48,7 +48,7 @@
 //
 // Запуск тестов: cd Degg_Images_Save_Compare && node tests/_smoke_*.mjs
 
-const DSC_JS_VERSION = "2.15.0-midbtn-pan-fwd";
+const DSC_JS_VERSION = "2.16.0-bg-run-catchup";
 console.log(`[Degg_Images_Save_Compare] JS ${DSC_JS_VERSION} loaded`);
 
 // ── bootstrap (Nodes 2.0: только window.comfyAPI) ──────────────────────────
@@ -511,6 +511,21 @@ function refreshLabels(node) {
   const label = st.zoom > 1.005 ? `${st.zoom.toFixed(1)}×` : "";
   st.dom.badge.textContent = label;
   css(st.dom.badge, { display: label ? "block" : "none" });
+}
+
+/**
+ * Уже ли этот слот показывает тот же файл (перерисовывать нечего)?
+ *
+ * ⛔ Нужно из-за onNodeOutputsUpdated: фронтенд зовёт хук на КАЖДОЕ
+ * присваивание app.nodeOutputs (в т.ч. повторное восстановление того же графа).
+ * Без этой проверки слот каждый раз пересбрасывался бы (мигание превью).
+ */
+function slotShows(st, slot, item) {
+  const cur = slot === 1 ? st.meta1 : st.meta2;
+  if (!cur || !item || !item.filename) return false;
+  return cur.filename === item.filename
+    && (cur.subfolder || "") === (item.subfolder || "")
+    && (cur.type || "output") === (item.type || "temp");
 }
 
 /**
@@ -1698,43 +1713,49 @@ function onConfigure(node) {
   if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
 }
 
-function onExecuted(node, message) {
+/**
+ * Раскладывает ВЫХОД ноды (ключи нашего ui-контракта) по слотам превью.
+ *
+ * Единая точка для двух входов одного и того же события:
+ *   • onExecuted          — генерация завершилась, нода в АКТИВНОМ графе;
+ *   • onNodeOutputsUpdated — фронтенд восстановил выходы (возврат к воркфлоу
+ *                            или загрузка истории из очереди).
+ */
+function applyOutput(node, output) {
   if (!node) return;
-  ensureState(node);
+  const st = ensureState(node);
 
-  const list = (message && message.degg_compare_images) || null;
-  const openPath = message && message.degg_open_path && message.degg_open_path[0];
+  const list = Array.isArray(output && output.degg_compare_images)
+    ? output.degg_compare_images : null;
+  const openPath = output && output.degg_open_path && output.degg_open_path[0];
   // Ключ присутствует и с пустым путём: «» обязан чистить кэш пути, иначе
   // кнопка «Открыть» ведёт на файл прошлого прогона (баг T-fix openPath).
   if (openPath !== undefined) node._dscOpenPath = openPath;
 
-  const had1 = !!ensureState(node).meta1;
-  const had2 = !!ensureState(node).meta2;
-  const seen = { 1: false, 2: false };
-  if (Array.isArray(list)) {
-    for (const item of list) {
-      const slot = Number(item && item.slot);
-      if (slot === 1) seen[1] = true;
-      if (slot === 2) seen[2] = true;
-    }
-  }
-
-  // Слоты без свежих данных (например, image_2 отключён) сохраняем как были.
-  if (seen[1] || !had1) setSlotImage(node, 1, null, "");
-  if (seen[2] || !had2) setSlotImage(node, 2, null, "");
-
-  if (Array.isArray(list)) {
+  const had = { 1: !!st.meta1, 2: !!st.meta2 };
+  const fresh = { 1: null, 2: null };
+  if (list) {
     for (const item of list) {
       if (!item || !item.filename) continue;
       const slot = Number(item.slot);
-      if (slot !== 1 && slot !== 2) continue;
-      const meta = {
+      if (slot === 1 || slot === 2) fresh[slot] = item;
+    }
+  }
+
+  for (const slot of [1, 2]) {
+    const item = fresh[slot];
+    if (item) {
+      // Уже показано (повторное восстановление тех же выходов) — не трогаем DOM.
+      if (slotShows(st, slot, item)) continue;
+      setSlotImage(node, slot, {
         filename: item.filename,
         subfolder: item.subfolder || "",
         type: item.type || "temp",
-      };
-      const dim = item.width && item.height ? `${item.width}×${item.height}` : "";
-      setSlotImage(node, slot, meta, dim);
+      }, item.width && item.height ? `${item.width}×${item.height}` : "");
+    } else if (!had[slot]) {
+      // Слота нет в свежих данных (например, image_2 отключён): раньше его
+      // не было — фиксируем «пусто», иначе оставляем как было.
+      setSlotImage(node, slot, null, "");
     }
   }
 
@@ -1742,6 +1763,75 @@ function onExecuted(node, message) {
   persistImages(node);
   updateOpenButton(node);
   if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+}
+
+function onExecuted(node, message) {
+  applyOutput(node, message);
+}
+
+/** Активный корневой граф (Nodes 2.0: app.rootGraph; legacy: app.graph). */
+function graphRoot() {
+  const a = app || pickApp();
+  try {
+    return (a && (a.rootGraph || a.graph)) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Нода по id исполнения (может прийти строкой/локатором — пробуем оба). */
+function findNode(graph, id) {
+  try {
+    return (graph.getNodeById && (graph.getNodeById(id) || graph.getNodeById(Number(id)))) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * ⭐ ФРОНТЕНД ВОССТАНОВИЛ ВЫХОДЫ ГРАФА — превью обязано догнать.
+ *
+ * ⛔ Зачем это нужно (баг «после фоновой генерации превью старое»).
+ * Сообщение `executed` доходит до ноды только если она лежит в АКТИВНОМ
+ * графе — в исходниках фронтенда (static/assets/settingStore-*.js, 1.55.17):
+ *
+ *   q.addEventListener(`executed`, ({detail:e}) => {
+ *     let n = tryNormalizeNodeExecutionId(e.display_node || e.node);
+ *     if (!n) return;
+ *     t.setNodeOutputsByExecutionId(n, e.output);          // выход сохранён ВСЕГДА
+ *     let r = getNodeByExecutionId(this.rootGraph, n);     // ← активный граф
+ *     r && r.onExecuted && r.onExecuted(e.output);         // …а обработчик — нет
+ *   });
+ *
+ * Пока пользователь на другом воркфлоу, узла в `rootGraph` нет, `onExecuted`
+ * не вызывается, и в ноде остаётся картинка прошлого прогона. Возврат идёт
+ * через `ChangeTracker.restore()`:
+ *
+ *   restore(){ …, this.nodeOutputs && _N().restoreOutputs(this.nodeOutputs), … }
+ *   // restoreOutputs → app.nodeOutputs = snapshotOutputs()
+ *   // set nodeOutputs(e){ … invokeExtensions(`onNodeOutputsUpdated`, e) }
+ *
+ * т.е. выходы приезжают сюда. Тем же путём возвращают свои виджеты штатные
+ * расширения фронтенда (PreviewAny / Preview3D / PreviewAudio / SaveGLB).
+ *
+ * Гейт по типу ноды обязателен: карта приходит для ВСЕГО графа, а id соседних
+ * нод могут совпасть с «нашим» слотом.
+ */
+function applyRestoredOutputs(outputs) {
+  if (!outputs) return;
+  const graph = graphRoot();
+  if (!graph) return;
+  for (const id of Object.keys(outputs)) {
+    const node = findNode(graph, id);
+    if (!node) continue;
+    const cls = (node.constructor && node.constructor.comfyClass) || node.comfyClass;
+    if (cls !== NODE_NAME && node.type !== NODE_NAME) continue;
+    try {
+      applyOutput(node, outputs[id]);
+    } catch (e) {
+      /* ignore */
+    }
+  }
 }
 
 function onRemoved(node) {
@@ -1790,6 +1880,16 @@ if (app && app.registerExtension) {
       // ⛔ proto.computeSize / proto.computeLayoutSize НЕ перезаписываем:
       // LGraphCanvas клампит ресайз по node.computeSize() на каждом pointermove,
       // а у ноды фронтенд computeLayoutSize не вызывает вообще.
+    },
+
+    /**
+     * ⭐ Выходы графа восстановлены (возврат к воркфлоу / загрузка истории).
+     * Фронтенд зовёт этот хук на каждое присваивание `app.nodeOutputs`
+     * (ChangeTracker.restore → restoreOutputs → set nodeOutputs).
+     * Именно тут нода догоняет прогон, завершившийся в ФОНЕ.
+     */
+    onNodeOutputsUpdated(outputs) {
+      applyRestoredOutputs(outputs);
     },
   });
 }
@@ -1865,6 +1965,9 @@ if (typeof window !== "undefined") {
     onNodeCreated: onNodeCreated,
     onConfigure: onConfigure,
     onExecuted: onExecuted,
+    applyOutput: applyOutput,
+    applyRestoredOutputs: applyRestoredOutputs,
+    slotShows: slotShows,
     onRemoved: onRemoved,
     zoomAt: zoomAt,
     setSliderFromClientX: setSliderFromClientX,
