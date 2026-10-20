@@ -557,6 +557,29 @@ if (JS) {
   check("js: onExecuted и хук восстановления — ОДНА точка правки (applyOutput)",
     /function onExecuted\(node, message\)\s*\{\s*applyOutput\(node, message\);\s*\}/.test(JSC)
     && /function applyOutput\(node, output\)\s*\{/.test(JSC));
+  // ── ⭐ РАЗРЫВ СВЯЗИ: догон по /history после реконнекта ──────────────────
+  // `executed` адресован конкретному клиенту (sid = client_id промпта); пока
+  // сокет закрыт, событие теряется. Фронтенд 1.55.18 на `reconnected` чинит
+  // только очередь (useReconnectQueueRefresh.ts) — выходы из истории не
+  // восстанавливает, поэтому догон обязателен.
+  has(JSC, /addEventListener\(\s*"reconnected"/,
+    "js: догон после реконнекта подписан на событие reconnected");
+  has(JSC, /fetchApi\(\s*`?\/?history\?max_items=/,
+    "js: единственный источник догона — /history?max_items=…");
+  has(JSC, /function catchUpFromHistory\(\)/,
+    "js: catchUpFromHistory() — отдельная точка догона");
+  has(JSC, /recs\.sort\(\(x, y\) => historyQueueNumber\(y\) - historyQueueNumber\(x\)\)/,
+    "js: записи истории сортируются по номеру очереди (самая свежая первой)");
+  has(JSC, /out && Array\.isArray\(out\.degg_compare_images\)/,
+    "js: применяется только запись с выходом ИМЕННО этой ноды");
+  has(JSC, /RECONNECT_CATCHUP_BUSY/,
+    "js: RECONNECT_CATCHUP_BUSY — один запрос истории за раз");
+  check("js: догон не заводит timers/опросов и глобальных слушателей",
+    !/setInterval|visibilitychange/.test(JSC)
+    && !/window\.addEventListener\(\s*"reconnect/.test(JSC));
+  check("js: догон и onExecuted ведут в ОДНУ applyOutput",
+    /function catchUpFromHistory\(\)[\s\S]{0,2000}?applyOutput\(node, out\)/.test(JSC));
+
   check("js: хук восстановления не заводит глобальных слушателей/timers",
     !/addEventListener\(`?\"?visibilitychange/.test(JSC)
     && !/setInterval/.test(JSC));

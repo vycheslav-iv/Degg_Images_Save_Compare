@@ -1589,10 +1589,130 @@ check("штамп: ensureSlotSrc возвращает src из метаданн�
 check("штамп: ensureSlotSrc не сбрасывает подпись размера",
   sst.dim1 === "480×160", String(sst.dim1));
 
-console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);
-if (errors.length) {
-  errors.forEach((e) => console.log("  - " + e));
-  console.log("SMOKE FAILED");
-  process.exit(1);
+// ── разрыв связи: догон по /history после реконнекта (§4.11) ──────────────
+// ⛔ Проверяем ИМЕННО ту ветку, которой не было у фонового катчапа: `executed`
+// потерян в разрыве сокета, снимка ChangeTracker нет — единственный источник
+// правды /history. Вызов идёт через настоящий обработчик `reconnected`,
+// зарегистрированный setup(), а не прямым вызовом функции.
+
+const apiStub = sandbox.comfyAPI.api.api;
+const microtask = () => new Promise((r) => setImmediate(r));
+
+const mcGraph = {
+  _nodes: [],
+  getNodeById(id) {
+    return this._nodes.filter((n) => String(n.id) === String(id))[0] || null;
+  },
+};
+appInstance.rootGraph = mcGraph;
+appInstance.graph = mcGraph;
+mcGraph._nodes.push(stampNode);
+
+/** Свежая нода нашего типа (свой state, без прошлых выходов). */
+function makeFreshNode(id) {
+  const n = makeNode();
+  n.id = id;
+  n.type = "Degg_Images_Save_Compare";
+  protoHolder.onNodeCreated.call(n);
+  rafQueue.splice(0).forEach((f) => f());
+  mcGraph._nodes.push(n);
+  return n;
 }
-console.log("SMOKE OK");
+
+let mcListeners = [];
+apiStub.addEventListener = (type, fn) => { mcListeners.push({ type, fn }); };
+capturedExt.setup();
+capturedExt.setup();
+check("reconnect: setup подписывает на reconnected РОВНО один раз",
+  mcListeners.length === 1 && mcListeners[0].type === "reconnected",
+  mcListeners.map((l) => l.type).join(","));
+const fireReconnect = () => {
+  for (const l of mcListeners) if (l.type === "reconnected") l.fn();
+};
+
+let histReq = 0;
+const useHistory = (history, ok = true) => {
+  apiStub.fetchApi = () => {
+    histReq += 1;
+    return Promise.resolve({
+      ok,
+      json: () => Promise.resolve(history),
+    });
+  };
+};
+
+(async () => {
+  // Порядок ключей в ответе — СТАРЫЙ прогон первым: без сортировки по номеру
+  // очереди догон применил бы устаревший выход (и штамп его не спас бы, т.к.
+  // он больше текущего).
+  useHistory({
+    old: { prompt: [2, "old"], outputs: { "3": outOf("1700000000000000003") } },
+    fresh: { prompt: [9, "fresh"], outputs: { "3": outOf("1700000000000000004") } },
+  });
+  fireReconnect();
+  await microtask();
+  await microtask();
+  check("⭐ reconnect: догон применяет САМЫЙ СВЕЖИЙ выход из /history",
+    DSC.stampOf(sst.meta1) === "1700000000000000004", DSC.stampOf(sst.meta1));
+  check("reconnect: /history запрошен (не подмена прямым вызовом)",
+    histReq === 1, String(histReq));
+
+  // Гейт: карта истории приходит для ВСЕГО сервера — чужой id не наш.
+  const freshNode = makeFreshNode(5);
+  const freshState = DSC.ensureState(freshNode);
+  useHistory({
+    foreign: { prompt: [3, "x"], outputs: { "77": outOf("1700000000000000005") } },
+  });
+  fireReconnect();
+  await microtask();
+  await microtask();
+  check("reconnect: выход ЧУЖОЙ ноды не применяется",
+    freshState.meta1 === null || freshState.meta1 === undefined,
+    JSON.stringify(freshState.meta1));
+
+  // Сеть/сервер недоступны: превью не меняется, исключения нет.
+  const before = DSC.stampOf(sst.meta1);
+  apiStub.fetchApi = () => Promise.resolve({ ok: false, json: () => Promise.resolve(null) });
+  let threw = null;
+  try {
+    fireReconnect();
+    await microtask();
+    await microtask();
+  } catch (e) { threw = e; }
+  check("reconnect: недоступная история не роняет и не сбрасывает превью",
+    !threw && DSC.stampOf(sst.meta1) === before, String(threw || ""));
+
+  // Параллельный вход (второй reconnected, пока первый запрос в полёте) —
+  // ровно один запрос истории.
+  let resolveHist;
+  let inflight = 0;
+  apiStub.fetchApi = () => {
+    inflight += 1;
+    return new Promise((r) => { resolveHist = () => r({ ok: true, json: () => Promise.resolve({}) }); });
+  };
+  fireReconnect();
+  fireReconnect();
+  await microtask();
+  check("reconnect: повторный вход во время запроса не дублирует /history",
+    inflight === 1, String(inflight));
+  resolveHist();
+  await microtask();
+  await microtask();
+  apiStub.fetchApi = () => { inflight += 1; return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); };
+  fireReconnect();
+  await microtask();
+  await microtask();
+  check("reconnect: busy снимается после ответа (следующий реконнект снова читает историю)",
+    inflight === 2, String(inflight));
+
+  console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);
+  if (errors.length) {
+    errors.forEach((e) => console.log("  - " + e));
+    console.log("SMOKE FAILED");
+    process.exit(1);
+  }
+  console.log("SMOKE OK");
+})().catch((e) => {
+  console.log("SMOKE FAILED: " + (e && e.stack ? e.stack : e));
+  process.exit(1);
+});

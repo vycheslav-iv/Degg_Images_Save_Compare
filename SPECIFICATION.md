@@ -329,7 +329,7 @@ Alt+wheel — **особая функция Side-by-Side** (зум превью)
 при возврате в ноде **старое** изображение, хотя новое сохранено на диск.
 Если не уходить — превью обновляется нормально.
 
-**Механика (исходники фронтенда 1.55.17, `static/assets/settingStore-*.js`):**
+**Механика (исходники фронтенда 1.55.17/1.55.18, `static/assets/settingStore-*.js`):**
 
 ```js
 q.addEventListener(`executed`, ({detail:e}) => {
@@ -368,7 +368,7 @@ restore(){ …, this.nodeOutputs && _N().restoreOutputs(this.nodeOutputs), … }
 | Поиск ноды | `graphRoot()` = `app.rootGraph \|\| app.graph` (Nodes 2.0/legacy) + `findNode(graph, id)` c фолбэком `Number(id)` — `Object.keys` даёт строки |
 | Одна точка правки | `onExecuted(node, message)` → `applyOutput(node, output)`; хук → `applyRestoredOutputs(outputs)` → `applyOutput(node, …)` |
 | Идемпотентность | `slotShows(st, slot, item)` — хук зовётся на КАЖДОЕ присваивание `app.nodeOutputs`; без проверки превью мигало бы при каждом восстановлении |
-| Без новых слушателей | ни `window`/`document`-слушателей, ни timers — только хук расширения |
+| Без глобальных слушателей | ни `window`/`document`-слушателей, ни timers; `api.addEventListener` — штатная шина фронтенда (§4.11) |
 
 ⛔ **Почему нельзя было обойтись `visibilitychange`/таймером:** у ноды нет
 глобальных слушателей (§4.2), а момент «вернулся в воркфлоу» знает только
@@ -435,6 +435,66 @@ restore(){ …, this.nodeOutputs && _N().restoreOutputs(this.nodeOutputs), … }
 запасную ветку — мутация «убрать `&v=` из ветки `api.apiURL`» оставалась
 ЗЕЛЁНОЙ, хотя в реальном браузере работает именно `apiURL`. Теперь аудит
 требует версию в обеих ветках (мутация A1 → RED).
+
+### 4.11. ⭐ Прогон в разрыве связи: догон по `/history` после реконнекта
+
+**Симптом (со слов пользователя):** «первая генерация после перезапуска ComfyUI,
+ушёл на другую страницу браузера, генерация завершилась — вернулся, в превью
+СТАРОЕ изображение, файл на диске новый».
+
+**Почему не спасает §4.9.** `executed` сервер шлёт **конкретному клиенту**
+(`sid = client_id` промпта), а не broadcast. Пока сокет закрыт (рестарт сервера,
+скрытая вкладка с отложенным реконнектом, засыпание вкладки на мобильном),
+событие теряется безвозвратно — у ноды нет ни `onExecuted`, ни снимка
+`ChangeTracker`, который мог бы восстановить хук.
+
+На `reconnected` фронтенд 1.55.18 делает только перечитывание очереди
+(`useReconnectQueueRefresh.ts`: `queueStore.update()` + `clearActiveJobIfStale()`);
+выходы нод из истории он не восстанавливает и `onNodeOutputsUpdated` не зовёт —
+проверено по `sourcesContent` фронтенда. Значит, событие надо догнать самим.
+
+**Лечение:** `setup()` расширения подписывается на `api.addEventListener("reconnected")`
+→ `catchUpFromHistory()`:
+
+| Требование | Как выполнено |
+|---|---|
+| Источник | `api.fetchApi("/history?max_items=10")` (сервер отдаёт dict `prompt_id → record`) |
+| Что применяем | для каждой НАШЕЙ ноды графа — выход **самой свежей** записи истории, где есть `outputs[node.id]` c `degg_compare_images`; сортировка по `prompt[0]` (номер очереди) |
+| Одна точка правки | `applyOutput(node, output)` — та же, что у `onExecuted`/фона |
+| Не откатить назад | штамп файла (`cmpStamp`) внутри `applyOutput`; запись без штампа не перебивает текущую со штампом |
+| Гейт по типу | `comfyClass`/`type` == `Degg_Images_Save_Compare` |
+| Без гонок | `RECONNECT_CATCHUP_BUSY` — один запрос истории за раз; `setup()` идемпотентен (`RECONNECT_HOOKED`) |
+| Сеть | ошибка `/history` глотается: превью остаётся как было, нода не падает |
+
+Версия расширения поднята до `DSC_JS_VERSION = "2.18.0-reconnect-catchup"`
+(константа в начале `web/js/degg_images_save_compare.js`).
+
+⛔ **Ловушка прибора (поймана на пробе):** ключи `outputs` в истории — это id
+нод **промпта**, а не графа. Проба сначала отправляла промпт с нашей нодой под
+id `2` при ноде графа `1` — догон «не находил» выход, и проба краснела на
+исправном коде. В реальном прогоне id совпадают, но проверка обязана это
+повторять (`id` нашей ноды в промпте = `1`).
+
+**Проверки:**
+
+| Проверка | Что меряет |
+|---|---|
+| `tests/_probe_live_reconnect.py` (**живая**, вне `check.py`) | база: превью = `01.webp`, страница слышит `executed`; разрыв: `api_host` → мёртвый порт, сокет закрыт; промпт с `client_id` страницы завершается; реконнект (`reconnected` = 1) → превью обязано показать файл из `/history`, картинка `loaded=true`. Красная база до правки: **FAIL: 1** (`meta=01.webp` после реконнекта) |
+| smoke «reconnect: …» | `catchUpFromHistory` берёт самую свежую запись, гейтит чужие ноды/id, не падает без `api`/истории |
+| audit «js: догон после реконнекта…» | статический контракт: подписка на `reconnected`, `/history`, `applyOutput`, busy-флаг |
+
+⛔ Проба эмулирует разрыв, а не перезапускает сервер: `api_host` подменяется на
+`127.0.0.1:9`, штатный реконнект падает, затем host возвращается — сокет
+переподключается с `isReconnect=true` и фронтенд шлёт настоящий `reconnected`.
+Промпт уходит с `client_id` страницы, поэтому сервер считает его клиентом
+вкладки — ровно как при реальной генерации.
+
+**Транспортный флейк пробы (не дефект ноды):** проверка загрузки картинки
+однажды дала `loaded=false` при уже выставленном `src`, хотя `/view` позже
+отвечал 200 — `<img>` не успел загрузиться за отведённые 20 с. В пробу добавлен
+ретрай: повторное присваивание `im.src = im.src` и вторая попытка ожидания
+(`complete && naturalWidth > 0`). Контроль: три прогона подряд — `9/0`.
+Без ретрая проба краснела бы на исправном коде (ложный RED).
 
 ## 5. Локализация (RU/EN)
 
@@ -522,13 +582,14 @@ Slider/Overlap/Difference/Blink просто не срабатывают: пре
 ```bash
 cd Degg_Images_Save_Compare
 python tests/_test_degg_images_save_compare.py   # → ок=61 / FAIL: 0 / ТЕСТ ПРОЙДЕН
-node tests/_smoke_degg_images_save_compare.mjs   # → ok: 281 / SMOKE OK
-node tests/_audit_degg_images_save_compare.mjs   # → ok: 266 / аудит чист (CRLF-устойчивый: read() нормализует \r\n)
+node tests/_smoke_degg_images_save_compare.mjs   # → ok: 288 / SMOKE OK
+node tests/_audit_degg_images_save_compare.mjs   # → ok: 274 / аудит чист (CRLF-устойчивый: read() нормализует \r\n)
 python ../_process/check.py Degg_Images_Save_Compare
 
 # живые пробы (вне check.py — нужен запущенный ComfyUI + Chrome):
 python tests/_probe_live_switch.py              # фоновый прогон: хук onNodeOutputsUpdated (§4.9)
 python tests/_probe_live_stale.py               # штамп файла: то же имя, новые байты (§4.10)
+python tests/_probe_live_reconnect.py           # разрыв связи: догон по /history (§4.11)
 python tests/_probe_live_dom.py                 # DOM-аудит живого узла
 ```
 

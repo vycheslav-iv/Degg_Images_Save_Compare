@@ -48,7 +48,7 @@
 //
 // Запуск тестов: cd Degg_Images_Save_Compare && node tests/_smoke_*.mjs
 
-const DSC_JS_VERSION = "2.17.0-file-stamp";
+const DSC_JS_VERSION = "2.18.0-reconnect-catchup";
 console.log(`[Degg_Images_Save_Compare] JS ${DSC_JS_VERSION} loaded`);
 
 // ── bootstrap (Nodes 2.0: только window.comfyAPI) ──────────────────────────
@@ -1908,6 +1908,84 @@ function applyRestoredOutputs(outputs) {
   }
 }
 
+/**
+ * ⭐ ДОГОН ПОСЛЕ РЕКОННЕКТА — прогон, завершившийся в разрыве связи.
+ *
+ * ⛔ Второй, независимый канал потери события (баг «первая генерация после
+ * перезапуска, ушёл на другую страницу — превью старое»). `executed` сервер
+ * шлёт КОНКРЕТНОМУ клиенту (sid = client_id промпта), а не broadcast. Пока
+ * сокет закрыт (рестарт ComfyUI, скрытая вкладка с отложенным реконнектом,
+ * засыпание вкладки на мобильном), событие теряется безвозвратно.
+ *
+ * Фронтенд 1.55.18 на `reconnected` перечитывает ТОЛЬКО очередь
+ * (useReconnectQueueRefresh.ts: queueStore.update + clearActiveJobIfStale) —
+ * выходы нод из истории не восстанавливает, `onNodeOutputsUpdated` не зовёт.
+ * Поэтому ни onExecuted, ни фон-катчап (applyRestoredOutputs) не срабатывают:
+ * у ноды нет ни события, ни снимка.
+ *
+ * Лечение: по `reconnected` — один раз прочитать /history и применить к каждой
+ * нашей ноде выход САМОЙ СВЕЖЕЙ записи с её id. Штамп файла (`stampOf`) внутри
+ * applyOutput не даёт откатить превью назад, если оно уже новее.
+ */
+const RECONNECT_HISTORY_MAX = 10;
+let RECONNECT_CATCHUP_BUSY = false;
+let RECONNECT_HOOKED = false;
+
+/** Номер записи истории (порядок очереди); нет номера — считаем старой. */
+function historyQueueNumber(rec) {
+  const p = rec && rec.prompt;
+  if (Array.isArray(p) && Number.isFinite(Number(p[0]))) return Number(p[0]);
+  return 0;
+}
+
+function catchUpFromHistory() {
+  const a = api || pickApi();
+  if (!a || typeof a.fetchApi !== "function" || RECONNECT_CATCHUP_BUSY) return;
+  const graph = graphRoot();
+  if (!graph) return;
+
+  const nodes = [];
+  const list = graph._nodes || graph.nodes || [];
+  for (const n of list) {
+    if (!n) continue;
+    const cls = (n.constructor && n.constructor.comfyClass) || n.comfyClass;
+    if (cls === NODE_NAME || n.type === NODE_NAME) nodes.push(n);
+  }
+  if (!nodes.length) return;
+
+  RECONNECT_CATCHUP_BUSY = true;
+  const release = () => { RECONNECT_CATCHUP_BUSY = false; };
+  let req;
+  try {
+    req = a.fetchApi(`/history?max_items=${RECONNECT_HISTORY_MAX}`);
+  } catch (e) {
+    release();
+    return;
+  }
+
+  Promise.resolve(req)
+    .then((r) => (r && r.ok ? r.json() : null))
+    .then((json) => {
+      if (!json) return;
+      const hist = json.History || json;
+      const recs = Object.keys(hist)
+        .map((k) => hist[k])
+        .filter((r) => r && r.outputs);
+      recs.sort((x, y) => historyQueueNumber(y) - historyQueueNumber(x));
+      for (const node of nodes) {
+        for (const rec of recs) {
+          const out = rec.outputs[String(node.id)];
+          if (out && Array.isArray(out.degg_compare_images)) {
+            try { applyOutput(node, out); } catch (e) { /* ignore */ }
+            break; // только самая свежая запись с выходом этой ноды
+          }
+        }
+      }
+    })
+    .catch(() => { /* история недоступна — превью останется как было */ })
+    .finally(release);
+}
+
 function onRemoved(node) {
   hideHelp(node);
   const st = node && node._cmp;
@@ -1964,6 +2042,19 @@ if (app && app.registerExtension) {
      */
     onNodeOutputsUpdated(outputs) {
       applyRestoredOutputs(outputs);
+    },
+
+    /**
+     * ⭐ Сокет переподключился после разрыва. Всё, что сервер отправил, пока
+     * связи не было (в т.ч. `executed`), потеряно — догоняем по /history.
+     */
+    setup() {
+      const a = api || pickApi();
+      if (!a || typeof a.addEventListener !== "function" || RECONNECT_HOOKED) return;
+      RECONNECT_HOOKED = true;
+      a.addEventListener("reconnected", () => {
+        try { catchUpFromHistory(); } catch (e) { /* ignore */ }
+      });
     },
   });
 }
@@ -2044,6 +2135,7 @@ if (typeof window !== "undefined") {
     onExecuted: onExecuted,
     applyOutput: applyOutput,
     applyRestoredOutputs: applyRestoredOutputs,
+    catchUpFromHistory: catchUpFromHistory,
     slotShows: slotShows,
     onRemoved: onRemoved,
     zoomAt: zoomAt,
