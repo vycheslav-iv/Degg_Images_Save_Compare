@@ -7,93 +7,80 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- **Багфикс «превью не обновляется / показывает старый кадр»** (SPECIFICATION.md §4.10).
-  Замер `tests/_probe_live_stale.py` (реальный Chrome + фронтенд): **11 ok / 4 FAIL**
-  до правки → **15 ok / 0 FAIL** после. S2 (нода вне кадра, Nodes 2.0) — НЕ баг:
-  DOM не выгружается, `executed` доходит, превью обновляется.
-- **Причина S1**: counter `get_save_image_path` считается по файлам в папке →
-  после удаления файла следующий прогон пишет ТО ЖЕ имя → `slotShows` считал
-  «уже показано» (и браузер отдавал старые байты из кэша `/view`).
-  **Причина S3**: `onNodeOutputsUpdated`/restore присылал выход ПРОШЛОГО прогона
-  и откатывал превью назад.
-- **Лечение — «штамп файла»**: Python `_stamp_for()` (`st_mtime_ns` строкой +
-  модульный `_STAMP_LAST` для монотонности, шаг часов Windows ~15 мс); JS
-  `stampOf`/`cmpStamp` (сравнение цифровых строк), `&v=<stamp>` в **обеих**
-  ветках `metaUrl`, сверка штампа в `slotShows`, guard `cmpStamp(...) < 0 →
-  continue` в `applyOutput`, persist штампа в `dsc_meta`, `ensureSlotSrc` +
-  обёртка `onDrawForeground` (самоизлечение `src`; сверка через
-  `getAttribute("src")`, иначе абсолютное свойство → перезагрузка каждый кадр).
-- `DSC_JS_VERSION`: `2.16.0-bg-run-catchup` → **`2.17.0-file-stamp`**.
-- Тесты: python **61/0**, smoke **281/0**, audit **266/0**; `check.py` — провалов 0,
-  предупреждений 0 (поставлен предохранитель git: `.githooks/{pre-commit,commit-msg}`
-  + `core.hooksPath`).
-- Мутации доказали чувствительность: живая проба M1 (`slotShows` без штампа → 12/3),
-  M2 (снят guard → 14/1), M3 (`v=""` → 13/2); аудит A1–A4 → RED.
-  ⛔ A1 вскрыл слепоту моего же детектора: `metaUrl`-чек смотрел только запасную
-  ветку, а в браузере работает `api.apiURL` — теперь требуется `&v=` в ОБЕИХ.
-- **Закоммичено и запушено**: `5d66048` «Превью: штамп файла вместо имени
-  (cache-bust + монотонный guard)» → `origin/master` (11 файлов, +1084/−70).
-  В коммит вошли фикс, SPEC §4.10, три теста, живая проба `_probe_live_stale.py`,
-  `.githooks/` (pre-commit + commit-msg, `core.hooksPath`), снапшот памяти.
+- **Багфикс «превью старое после фонового прогона»** — второй, независимый от §4.9
+  канал: `executed` сервер шлёт конкретному клиенту (`sid = client_id` промпта),
+  при закрытом сокете (первая генерация после рестарта ComfyUI, скрытая вкладка)
+  событие теряется безвозвратно; фронтенд на `reconnected` чинит только очередь.
+- Лечение — догон по истории: `setup()` подписан на `api.addEventListener("reconnected")`
+  → `catchUpFromHistory()` берёт `/history?max_items=10`, сортирует по `prompt[0]`
+  и применяет выход самой свежей записи через ту же `applyOutput`.
+- Версия JS `2.18.0-reconnect-catchup`; спека §4.11, скил
+  `comfyui-background-run-catchup` (3 копии) продлён разделом §2.1.
+- Коммит `4fce31c` → https://github.com/vycheslav-iv/Degg_Images_Save_Compare
+  (master). Синхронизировано в рабочую копию ComfyUI.
 
 ## 2. Итоговое состояние кода
 
-- `web/js/degg_images_save_compare.js` (`DSC_JS_VERSION` js:51 — `2.17.0-file-stamp`):
-  - `stampOf(meta)` js:423, `cmpStamp(a,b)` js:433 — штамп как цифровая строка;
-  - `metaUrl(meta)` js:~446 — `&v=<stamp>` в ветках `api.apiURL` И запасной `/view`;
-  - `slotShows(st, slot, item)` js:~510 — идемпотентность ПО ШТАМПУ;
-  - `ensureSlotSrc(node)` js:~528 — самолечение `src` по метаданным (сверка атрибута);
-  - `applyOutput(node, output)` js:~1784 — единая точка; устаревший штамп пропускается;
-  - `persistImages`/`restoreImages` — `dsc_meta.*.stamp`;
-  - `onDrawForeground` js:~1753 — обёртка с `ensureSlotSrc(this)`;
-  - экспорты `stampOf`/`cmpStamp`/`ensureSlotSrc` js:~2013.
-- `degg_images_save_compare.py`: `_STAMP_LAST`/`_stamp_for()` (строки 61–79),
-  запись `"stamp": stamp` в UI (~197), штамп = `_stamp_for(full_path)`.
-- `tests/_probe_live_stale.py` — живая проба S1/S2/S3 (SETUP + STEP1..4, штампы
-  передаются строкой; S2-файл пишется ПОСЛЕ S1, иначе монотонный guard справедливо
-  отклоняет его как старый). В `check.py` не входит.
-- Тесты: python **61/0**, smoke **281/0**, audit **266/0**.
+- `web/js/degg_images_save_compare.js:51` — `DSC_JS_VERSION = "2.18.0-reconnect-catchup"`.
+- `web/js/degg_images_save_compare.js:1792` — `applyOutput(node, output)` — ЕДИНАЯ
+  точка разбора выхода для трёх входов: `onExecuted`, `applyRestoredOutputs`, догон.
+- `web/js/degg_images_save_compare.js:1894` — `applyRestoredOutputs(outputs)` —
+  хук `onNodeOutputsUpdated` (возврат на другой воркфлоу), гейт по типу + `findNode`.
+- `web/js/degg_images_save_compare.js:1935` — `historyQueueNumber(rec)` — номер
+  очереди из `rec.prompt[0]`; `:1941` — `catchUpFromHistory()` — один запрос
+  истории, `RECONNECT_CATCHUP_BUSY`, `break` после первой найденной записи.
+- `web/js/degg_images_save_compare.js:2043` — хук `onNodeOutputsUpdated`;
+  `:2053` — `setup()` с подпиской на `reconnected` и флагом `RECONNECT_HOOKED`.
+- `tests/_probe_live_reconnect.py` — живая проба разрыва: `wait_for` (174),
+  `history_record` (197), промпт с `client_id` страницы; нода в промпте id `1`,
+  `LoadImage` id `3`; ретрай загрузки `<img>`.
+- `degg_images_save_compare.py:64` — `_stamp_for()`, `:197` — запись PNG + `stamp`,
+  `:267` — `ui.degg_compare_images` (штами — предыдущий фикс, не ломать).
+- `SPECIFICATION.md` §4.11 — «Прогон в разрыве связи: догон по `/history`»;
+  §4.9 — оговорка про `api.addEventListener`.
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- Проба «слепла» на `document.getElementById(stage)`: первым `<img>` в stage идёт
-  слой b → `domIsLive` через `img.closest("[data-node-id]")`.
-- `getAttribute` нет у заглушки smoke → упало с TypeError; и хуже: сверка
-  `img.src` (абсолютный) с относительным `/view` вызвала бы перезагрузку каждый
-  кадр — сверяем атрибут с фолбэком на свойство.
-- Мутация A1: детектор аудита проверял только запасную ветку `metaUrl`;
-  в браузере идёт `api.apiURL` → чек расширен на обе ветки.
-- `_stamp_for` нужен из-за разрешения часов Windows (~15 мс): два прогона подряд
-  могли получить одинаковый `mtime_ns`.
+- **Ложный FAIL пробы**: ключи `outputs` в истории — id нод **промпта**, а не графа.
+  Проба отправляла нашу ноду под id `2` при ноде графа `1` → догон «не находил»
+  выход на исправном коде. Исправлено: id совпадают (`1`).
+- **Транспортный флейк**: `<img>` с уже выставленным `src` однажды не загрузился
+  за 20 с (`loaded=false`, `/view` позже 200). Добавлен ретрай `im.src = im.src`
+  + вторая попытка ожидания; контроль — 3 прогона подряд `9/0`.
+- **commit-msg хук** блокирует имена файлов, которых нет в индексе: в сообщении
+  нельзя упоминать не изменённые файлы (`_probe_live_stale.py`, `check.py`,
+  `*.ts`). Переформулировать без имён.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- `onNodeOutputsUpdated` зовётся на КАЖДОЕ присваивание `app.nodeOutputs` —
-  без `slotShows` превью мигало бы; гейт по типу ноды обязателен.
-- Guard `cmpStamp(...) < 0 → continue` — защита от выхода ПРОШЛОГО прогона; без
-  него S3 откатывает превью (мутация M2 → RED).
-- `&v=` нужен в ОБЕИХ ветках `metaUrl` (мутация A1 → RED аудита).
-- Штамп в Python — ТОЛЬКО строкой (`int` в JSON → JS теряет точность > 2^53).
-- `hideOnZoom: false` (§4.7); `forwardPointerToCanvas` точечный (§4.8);
-  `MODES` — протокольные значения (comfyui-combo-protocol-values).
-- `check.json`: ровно 3 проверки, expect-строки не менять.
-- `sync.py` не копирует `tests/`; Hard Reload после JS-правок, Python-правки —
-  только после перезапуска ComfyUI.
+- ⛔ Два канала — два разных лечения: хук `onNodeOutputsUpdated` (смена воркфлоу)
+  и догон по `/history` (разрыв связи). Не «унифицировать» в один.
+- ⛔ Не использовать `api.getHistory()` (в 1.55.x — `JobListItem[]` без `outputs`)
+  и не «реконнектить» через `api.resetSocket()` (даёт `isReconnect = false`,
+  `reconnected` не приходит).
+- ⛔ Никаких timers/`visibilitychange`/`window`-слушателей: только
+  `api.addEventListener` — штатная шина фронтенда.
+- Идемпотентность и штамп: `applyOutput` не откатывает превью на старый файл;
+  повторный реконнект безопасен.
+- Nodes 2.0: `const { app } = window.comfyAPI.app`, api — `window.comfyAPI.api.api`
+  (namespace ≠ клиент).
+- `_process/PROCESS.md`-правила: правки → `python sync.py Degg_Images_Save_Compare`
+  → перезапуск ComfyUI + Hard Reload (Ctrl+F5).
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Если симптом повторится при СМЕНЕ имени файла — смотреть уже не штамп, а
-  кэш `/view` на стороне сервера (заголовки кэширования ComfyUI).
-- Вынести в скил `comfyui-background-run-catchup` (или отдельный) правило
-  «имя файла ≠ версия содержимого: штамп + cache-bust + монотонный guard» —
-  спросить разрешение у пользователя.
+- Живая проверка пользователем: рестарт ComfyUI → генерация при уходе со страницы
+  → возврат: превью обязано показать новый файл (проба `9/0` подтверждает код).
+- При желании — распространить паттерн на другие ноды с превью (смоук/аудит уже
+  переносимы).
+- Проба эмулирует разрыв подменой `api_host`; отдельный сценарий «настоящий
+  рестарт сервера» не автоматизирован.
 
 ## 6. Связанные файлы
 
-- `web/js/degg_images_save_compare.js` — JS-расширение (вся логика превью)
-- `degg_images_save_compare.py` — `_stamp_for`, запись `stamp` в UI
-- `SPECIFICATION.md` §4.10 — контракт штампа; §4.9 — фоновый догон
-- `tests/_probe_live_stale.py` — живая проба S1/S2/S3 (ComfyUI + Chrome)
-- `tests/_smoke_degg_images_save_compare.mjs` — блок «штамп: …» (11 проверок)
-- `tests/_audit_degg_images_save_compare.mjs` — статические чеки штампа (9)
-- Рабочая копия: `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Degg_Images_Save_Compare\`
+- `SPECIFICATION.md`, `check.json`, `SESSION_MEMORY-history/`
+- `web/js/degg_images_save_compare.js`, `degg_images_save_compare.py`
+- `tests/_test_degg_images_save_compare.py` (61/0), `tests/_smoke_*.mjs` (288/0),
+  `tests/_audit_*.mjs` (274/0), `tests/_probe_live_reconnect.py` (9/0),
+  `tests/_probe_live_switch.py` (20/0), `tests/_probe_live_stale.py` (15/0)
+- Скил: `.opencode|.kilo|.agents/skills/comfyui-background-run-catchup/SKILL.md`
