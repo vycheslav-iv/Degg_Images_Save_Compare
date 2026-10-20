@@ -1503,6 +1503,92 @@ capturedExt.onNodeOutputsUpdated({ "1": { degg_open_path: ["D:/ComfyUI/output/ot
 check("фон: строковый id находится в графе через фолбэк Number(id)",
   bgNode._dscOpenPath === "D:/ComfyUI/output/other.png", String(bgNode._dscOpenPath));
 
+console.log("");
+// ── ⭐ ШТАМП ФАЙЛА: одно имя ≠ один и тот же файл ─────────────────────────
+// counter в Python считается по файлам в папке, поэтому после удаления файла
+// следующий прогон пишет ТО ЖЕ имя. Без версии содержимого (mtime_ns) фронтенд
+// считал «уже показано» и оставлял СТАРЫЙ кадр, а браузер отдавал старые байты
+// из кэша /view по тому же URL (живая проба: превью замирало на 320×200, пока
+// на диске лежал 480×160).
+check("штамп: metaUrl несёт версию файла (&v=)",
+  (() => {
+    const u = DSC.metaUrl({ filename: "a.png", subfolder: "", type: "temp", stamp: "1700000000000000001" });
+    return u.indexOf("&v=1700000000000000001") > 0;
+  })(), DSC.metaUrl({ filename: "a.png", subfolder: "", type: "temp", stamp: "1700000000000000001" }));
+check("штамп: новый штамп → ДРУГОЙ URL (кэш браузера не переиспользуется)",
+  DSC.metaUrl({ filename: "a.png", stamp: "1700000000000000001" })
+  !== DSC.metaUrl({ filename: "a.png", stamp: "1700000000000000002" }));
+check("штамп: без штампа URL не ломается (старые воркфлоу)",
+  DSC.metaUrl({ filename: "a.png", subfolder: "", type: "temp" })
+    .indexOf("&v=") < 0);
+check("штамп: cmpStamp упорядочивает строки точнее числа (>2^53)",
+  DSC.cmpStamp("1700000000000000001", "1700000000000000000") === 1
+  && DSC.cmpStamp("1700000000000000000", "1700000000000000001") === -1
+  && DSC.cmpStamp("1700000000000000001", "1700000000000000001") === 0);
+
+const stampNode = makeNode();
+stampNode.id = 3;
+stampNode.type = "Degg_Images_Save_Compare";
+protoHolder.onNodeCreated.call(stampNode);
+rafQueue.forEach((f) => f());
+rafQueue = [];
+const sst = DSC.ensureState(stampNode);
+const stampImg = sst.dom.a.img;
+let stampSrcSets = 0;
+const stampDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(stampImg), "src");
+Object.defineProperty(stampImg, "src", {
+  configurable: true,
+  get() { return stampDesc.get.call(this); },
+  set(v) { stampSrcSets += 1; return stampDesc.set.call(this, v); },
+});
+const outOf = (stamp, w = 320, h = 200) => ({
+  degg_compare_images: [{ filename: "same_00001_.png", subfolder: "", type: "temp",
+                          slot: 1, width: w, height: h, stamp: stamp }],
+  degg_open_path: [""],
+});
+
+DSC.applyOutput(stampNode, outOf("1700000000000000001"));
+check("штамп: первый показ ставит src с версией",
+  stampSrcSets === 1 && stampImg.src.indexOf("&v=1700000000000000001") > 0,
+  String(stampSrcSets) + " " + stampImg.src);
+check("штамп: штамп сохранён в meta слота",
+  DSC.stampOf(sst.meta1) === "1700000000000000001", DSC.stampOf(sst.meta1));
+
+DSC.applyOutput(stampNode, outOf("1700000000000000001"));
+check("штамп: ТО ЖЕ имя и ТОТ ЖЕ штамп → DOM не трогаем (идемпотентность)",
+  stampSrcSets === 1, String(stampSrcSets));
+
+DSC.applyOutput(stampNode, outOf("1700000000000000002", 480, 160));
+check("⭐ штамп: то же имя, НОВЫЙ штамп → превью перезагружено",
+  stampSrcSets === 2 && stampImg.src.indexOf("&v=1700000000000000002") > 0,
+  String(stampSrcSets) + " " + stampImg.src);
+check("штамп: подпись размера обновилась вместе с файлом",
+  sst.dim1 === "480×160", String(sst.dim1));
+
+DSC.applyOutput(stampNode, outOf("1700000000000000001", 320, 200));
+check("⭐ штамп: УСТАРЕВШИЙ выход (меньший штамп) не откатывает превью",
+  stampSrcSets === 2
+  && sst.meta1.filename === "same_00001_.png"
+  && DSC.stampOf(sst.meta1) === "1700000000000000002"
+  && sst.dim1 === "480×160",
+  String(stampSrcSets) + " " + DSC.stampOf(sst.meta1) + " " + sst.dim1);
+
+// persist/restore: штамп обязан пережить переключение воркфлоу, иначе после
+// возврата URL без версии → кэш браузера отдаст СТАРЫЕ байты.
+DSC.persistImages(stampNode);
+check("штамп: сохраняется в node.properties (dsc_meta.stamp)",
+  stampNode.properties.dsc_meta["1"].stamp === "1700000000000000002",
+  JSON.stringify(stampNode.properties.dsc_meta["1"]));
+
+// Страховка на кадре отрисовки: <img> потерял src (элемент пересоздан) —
+// ensureSlotSrc обязан вернуть АКТУАЛЬНЫЙ адрес из метаданных.
+stampImg._src = "";
+DSC.ensureSlotSrc(stampNode);
+check("штамп: ensureSlotSrc возвращает src из метаданных без новой меты",
+  (stampImg.src || "").indexOf("&v=1700000000000000002") > 0, stampImg.src);
+check("штамп: ensureSlotSrc не сбрасывает подпись размера",
+  sst.dim1 === "480×160", String(sst.dim1));
+
 console.log(`ok: ${oks.length}   FAIL: ${errors.length}`);
 if (errors.length) {
   errors.forEach((e) => console.log("  - " + e));

@@ -48,7 +48,7 @@
 //
 // Запуск тестов: cd Degg_Images_Save_Compare && node tests/_smoke_*.mjs
 
-const DSC_JS_VERSION = "2.16.0-bg-run-catchup";
+const DSC_JS_VERSION = "2.17.0-file-stamp";
 console.log(`[Degg_Images_Save_Compare] JS ${DSC_JS_VERSION} loaded`);
 
 // ── bootstrap (Nodes 2.0: только window.comfyAPI) ──────────────────────────
@@ -419,14 +419,42 @@ function navEnabled(node) {
 
 // ── картинки: загрузка / персистентность ──────────────────────────────────
 
+/** Штамп файла (mtime_ns из Python) строкой: точнее 2^53 и годится для URL. */
+function stampOf(meta) {
+  if (!meta || meta.stamp === undefined || meta.stamp === null) return "";
+  return String(meta.stamp);
+}
+
+/**
+ * Сравнение штампов (-1 / 0 / 1) без потери точности.
+ * Python отдаёт mtime_ns строкой; цифры одинаковой длины сравниваются
+ * лексикографически как числа, разной — длинная строка больше.
+ */
+function cmpStamp(a, b) {
+  const x = String(a || "").replace(/\D/g, "");
+  const y = String(b || "").replace(/\D/g, "");
+  if (!x || !y) return 0;
+  if (x.length !== y.length) return x.length > y.length ? 1 : -1;
+  if (x === y) return 0;
+  return x > y ? 1 : -1;
+}
+
+/**
+ * URL картинки. ⛔ Штамп в query — часть адреса: имя файла не уникально во
+ * времени (counter переиспользует имена после удаления), поэтому без версии
+ * браузер отдаёт из кэша СТАРЫЕ байты по тому же /view.
+ */
 function metaUrl(meta) {
   if (!meta || !meta.filename) return "";
   const q =
     `filename=${encodeURIComponent(meta.filename)}` +
     `&subfolder=${encodeURIComponent(meta.subfolder || "")}` +
     `&type=${encodeURIComponent(meta.type || "output")}`;
-  if (api && typeof api.apiURL === "function") return api.apiURL(`/view?${q}`);
-  return `/view?${q}`;
+  const v = stampOf(meta);
+  const url = api && typeof api.apiURL === "function"
+    ? api.apiURL(`/view?${q}${v ? `&v=${encodeURIComponent(v)}` : ""}`)
+    : `/view?${q}${v ? `&v=${encodeURIComponent(v)}` : ""}`;
+  return url;
 }
 
 /**
@@ -492,6 +520,34 @@ function setSlotImage(node, slot, meta, dim) {
   refreshLabels(node);
 }
 
+/**
+ * Страховка на кадр отрисовки: у слота есть метаданные, а <img> не грузит
+ * ИМЕННО их URL (элемент пересоздан / src сброшен фронтендом) — вернуть src.
+ * ⛔ Не трогаем метаданные и не сбрасываем слои: только догоняем адрес.
+ */
+function ensureSlotSrc(node) {
+  const st = ensureState(node);
+  if (!st.dom) return;
+  for (const slot of [1, 2]) {
+    const meta = slot === 1 ? st.meta1 : st.meta2;
+    const layer = slot === 1 ? st.dom.a : st.dom.b;
+    const img = layer && layer.img;
+    if (!meta || !img) continue;
+    const want = metaUrl(meta);
+    if (!want) continue;
+    // ⛔ Сверяем АТРИБУТ, а не свойство: img.src в браузере возвращает
+    // АБСОЛЮТНЫЙ адрес, и сравнение с относительным /view давало бы вечное
+    // «не совпало» → перезагрузка картинки каждый кадр.
+    const have = typeof img.getAttribute === "function"
+      ? img.getAttribute("src") : img.src;
+    if (have !== want) {
+      st[slot === 1 ? "img1" : "img2"] = img;
+      css(img, { display: "" });
+      img.src = want;
+    }
+  }
+}
+
 /** Картинка догрузилась/отвалилась — в Side-by-Side могла смениться ориентация. */
 function relayoutSbs(node) {
   if (currentMode(node) !== "Side-by-Side") return;
@@ -525,7 +581,9 @@ function slotShows(st, slot, item) {
   if (!cur || !item || !item.filename) return false;
   return cur.filename === item.filename
     && (cur.subfolder || "") === (item.subfolder || "")
-    && (cur.type || "output") === (item.type || "temp");
+    && (cur.type || "output") === (item.type || "temp")
+    // ⛔ Имя то же, а файл перезаписан (новый mtime) — это НОВАЯ картинка.
+    && stampOf(cur) === stampOf(item);
 }
 
 /**
@@ -539,8 +597,8 @@ function persistImages(node) {
   node.properties = node.properties || {};
   node.properties.dsc_open_path = node._dscOpenPath || "";
   node.properties.dsc_meta = {
-    1: st.meta1 ? { filename: st.meta1.filename, subfolder: st.meta1.subfolder || "", type: st.meta1.type || "output", dim: st.dim1 || "" } : null,
-    2: st.meta2 ? { filename: st.meta2.filename, subfolder: st.meta2.subfolder || "", type: st.meta2.type || "output", dim: st.dim2 || "" } : null,
+    1: st.meta1 ? { filename: st.meta1.filename, subfolder: st.meta1.subfolder || "", type: st.meta1.type || "output", dim: st.dim1 || "", stamp: stampOf(st.meta1) } : null,
+    2: st.meta2 ? { filename: st.meta2.filename, subfolder: st.meta2.subfolder || "", type: st.meta2.type || "output", dim: st.dim2 || "", stamp: stampOf(st.meta2) } : null,
   };
 }
 
@@ -553,10 +611,10 @@ function restoreImages(node) {
   const one = m["1"] || m[1];
   const two = m["2"] || m[2];
   if (one && one.filename) {
-    setSlotImage(node, 1, { filename: one.filename, subfolder: one.subfolder || "", type: one.type || "output" }, one.dim || "");
+    setSlotImage(node, 1, { filename: one.filename, subfolder: one.subfolder || "", type: one.type || "output", stamp: one.stamp || "" }, one.dim || "");
   }
   if (two && two.filename) {
-    setSlotImage(node, 2, { filename: two.filename, subfolder: two.subfolder || "", type: two.type || "output" }, two.dim || "");
+    setSlotImage(node, 2, { filename: two.filename, subfolder: two.subfolder || "", type: two.type || "output", stamp: two.stamp || "" }, two.dim || "");
   }
 }
 
@@ -1690,6 +1748,16 @@ function onNodeCreated(node) {
 
   addButtons(node);
   addPreviewWidget(node);       // DOM-превью: создать до restore
+
+  // Нода снова в кадре — сверяем фактический src слоёв с метаданными.
+  if (!node._dscDrawHooked) {
+    node._dscDrawHooked = true;
+    const origDraw = node.onDrawForeground;
+    node.onDrawForeground = function () {
+      if (origDraw) origDraw.apply(this, arguments);
+      try { ensureSlotSrc(this); } catch (e) { /* ignore */ }
+    };
+  }
   hookModeWidgets(node);
 
   restoreImages(node);          // картинки из properties (смена воркфлоу)
@@ -1747,10 +1815,16 @@ function applyOutput(node, output) {
     if (item) {
       // Уже показано (повторное восстановление тех же выходов) — не трогаем DOM.
       if (slotShows(st, slot, item)) continue;
+      // ⛔ Устаревший выход не должен откатывать превью назад: восстановление
+      // снимка (ChangeTracker.restore / app.nodeOutputs) может принести выход
+      // ПРОШЛОГО прогона уже после более свежего. Штамп строго меньше — пропуск.
+      const cur = slot === 1 ? st.meta1 : st.meta2;
+      if (cur && cmpStamp(stampOf(item), stampOf(cur)) < 0) continue;
       setSlotImage(node, slot, {
         filename: item.filename,
         subfolder: item.subfolder || "",
         type: item.type || "temp",
+        stamp: stampOf(item),
       }, item.width && item.height ? `${item.width}×${item.height}` : "");
     } else if (!had[slot]) {
       // Слота нет в свежих данных (например, image_2 отключён): раньше его
@@ -1939,6 +2013,9 @@ if (typeof window !== "undefined") {
     currentMode: currentMode,
     navEnabled: navEnabled,
     metaUrl: metaUrl,
+    stampOf: stampOf,
+    cmpStamp: cmpStamp,
+    ensureSlotSrc: ensureSlotSrc,
     persistImages: persistImages,
     restoreImages: restoreImages,
     setSlotImage: setSlotImage,

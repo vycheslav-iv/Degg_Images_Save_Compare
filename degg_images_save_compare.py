@@ -57,6 +57,29 @@ def open_file_in_viewer(filepath: str):
 #  Нода
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Версия последнего выданного штампа (монотонность в пределах процесса).
+_STAMP_LAST = 0
+
+
+def _stamp_for(path):
+    """Версия файла для превью: mtime_ns, СТРОГО возрастающая в процессе.
+
+    ⛔ На Windows время файла берётся из системных часов с шагом ~15 мс: два
+    прогона подряд могут получить ОДИН И ТОТ ЖЕ mtime_ns, и превью снова
+    замрёт (имя файла при этом тоже совпадает). Поэтому штамп не уменьшается
+    и не повторяется. Строкой — в JS число > 2^53 потеряло бы точность.
+    """
+    global _STAMP_LAST
+    try:
+        value = int(os.stat(path).st_mtime_ns)
+    except OSError:
+        value = 0
+    if value <= _STAMP_LAST:
+        value = _STAMP_LAST + 1
+    _STAMP_LAST = value
+    return str(value)
+
+
 class DeggImagesSaveCompare:
     """
     Save/Preview основного изображения + интерактивное сравнение двух кадров.
@@ -166,6 +189,12 @@ class DeggImagesSaveCompare:
             file = f"{name}_{counter:05}_.png"
             full_path = os.path.join(full_output_folder, file)
             img.save(full_path, pnginfo=metadata, compress_level=compress_level)
+            # ⛔ Имя файла НЕ уникально во времени: counter считается по
+            # файлам в папке, поэтому после удаления файла следующий прогон
+            # пишет ТО ЖЕ имя. Без версии содержимого фронтенд видит
+            # «тот же файл» и оставляет старое превью (баг S1), а браузер
+            # отдаёт старую картинку из кэша /view.
+            stamp = _stamp_for(full_path)
             results.append({
                 "filename": file,
                 "subfolder": subfolder,
@@ -173,6 +202,7 @@ class DeggImagesSaveCompare:
                 "full_path": full_path,
                 "width": width,
                 "height": height,
+                "stamp": stamp,
             })
             counter += 1
         return results

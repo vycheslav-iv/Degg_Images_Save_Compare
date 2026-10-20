@@ -225,6 +225,34 @@ with Image.open(one["full_path"]) as im:
     check("Save: PNG 6x4", im.size == (6, 4))
     check("Save: метаданные prompt записаны", '"class_type": "X"' in (im.text or {}).get("prompt", ""))
 
+check("Save: запись несёт stamp (mtime_ns строкой)",
+      isinstance(one.get("stamp"), str) and one["stamp"].isdigit()
+      and len(one["stamp"]) >= 19, repr(one.get("stamp")))
+
+# ⭐ Баг S1: имя файла переиспользуется. counter считается по файлам в папке,
+# поэтому после УДАЛЕНИЯ файла следующий прогон пишет ТО ЖЕ имя — и без версии
+# содержимого фронтенд оставлял старый кадр (живая проба: 320×200 на экране,
+# 480×160 на диске). Проверяем именно это условие, а не «stamp есть в коде».
+first_name = os.path.basename(one["full_path"])
+first_stamp = one["stamp"]
+os.remove(one["full_path"])
+res_again = node.DeggImagesSaveCompare().save_compare(
+    make_img(), save_mode=True, filename_prefix="TestPrefix", mode="Slider")
+two = ui_list(res_again)[0]
+check("⭐ S1: после удаления файла имя переиспользовано (условие бага)",
+      os.path.basename(two["full_path"]) == first_name,
+      "%s vs %s" % (os.path.basename(two["full_path"]), first_name))
+check("⭐ S1: stamp при том же имени ИЗМЕНИЛСЯ (превью не застревает)",
+      two.get("stamp") != first_stamp
+      and int(two.get("stamp") or 0) > int(first_stamp), "%s vs %s" % (two.get("stamp"), first_stamp))
+
+# Часы Windows дают mtime с шагом ~15 мс: два прогона подряд могли получить
+# одинаковый штамп. _stamp_for обязан быть строго возрастающим.
+s_a = node._stamp_for(two["full_path"])
+s_b = node._stamp_for(two["full_path"])
+check("_stamp_for: строго возрастает даже без изменения mtime",
+      int(s_b) > int(s_a), "%s → %s" % (s_a, s_b))
+
 # ── 6. save_compare: Preview mode ─────────────────────────────────────────
 N2 = node.DeggImagesSaveCompare()
 res_prev = N2.save_compare(make_img(), save_mode=False, filename_prefix="TestPrefix", mode="Slider")

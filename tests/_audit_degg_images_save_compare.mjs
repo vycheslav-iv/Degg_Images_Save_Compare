@@ -118,6 +118,35 @@ if (PY) {
 // ── 3. JS: контракт фронтенда ─────────────────────────────────────────────
 const JSC = JS ? stripComments(JS) : "";
 if (JS) {
+  // ── ⭐ ШТАМП ФАЙЛА: имя переиспользуется, версия содержимого обязательна ──
+  check("python: штамп файла берётся из mtime_ns через _stamp_for",
+    /def _stamp_for\(path\):[\s\S]{0,900}?st_mtime_ns/.test(PY)
+    && /"stamp":\s*_stamp_for\(full_path\)|stamp\s*=\s*_stamp_for\(full_path\)/.test(PY),
+    "_stamp_for");
+  check("python: штамп монотонен (часы Windows ~15 мс дают равный mtime)",
+    /_STAMP_LAST/.test(PY) && /value\s*<=\s*_STAMP_LAST/.test(PY)
+    && /_STAMP_LAST\s*\+\s*1/.test(PY), "монотонность");
+  check("python: штамп уходит в UI строкой (в JS числа >2^53 теряют точность)",
+    /"stamp":\s*stamp/.test(PY) && /return str\(value\)/.test(PY), "stamp → ui");
+  check("js: metaUrl несёт версию файла (&v=<stamp>) в ОБЕИХ ветках",
+    (JS.match(/&v=\$\{encodeURIComponent\(v\)\}/g) || []).length >= 2
+    && !/&v=`\s*:/.test(JS),
+    "metaUrl: apiURL + запасная");
+  check("js: slotShows сравнивает штамп (иначе «то же имя» = «тот же файл»)",
+    /function slotShows\(st, slot, item\)[\s\S]{0,600}?stampOf\(cur\)\s*===\s*stampOf\(item\)/.test(JS),
+    "slotShows");
+  check("js: устаревший выход не откатывает превью (cmpStamp < 0 → пропуск)",
+    /cmpStamp\(stampOf\(item\),\s*stampOf\(cur\)\)\s*<\s*0\)\s*continue;/.test(JS),
+    "monotonic guard");
+  check("js: штамп персистится в node.properties (dsc_meta.*.stamp)",
+    /dsc_meta\s*=\s*\{[\s\S]{0,800}?stamp:\s*stampOf\(st\.meta1\)/.test(JS), "persist stamp");
+  check("js: ensureSlotSrc сверяет АТРИБУТ src (свойство в браузере абсолютно)",
+    /function ensureSlotSrc\(node\)[\s\S]{0,900}?getAttribute\("src"\)/.test(JS),
+    "ensureSlotSrc");
+  check("js: ensureSlotSrc экспортирован и вызывается на кадре отрисовки",
+    /ensureSlotSrc: ensureSlotSrc,/.test(JS) && /ensureSlotSrc\(this\)/.test(JS),
+    "ensureSlotSrc wiring");
+
   has(JS, /const DSC_JS_VERSION\s*=\s*"/, "js: маркер сборки DSC_JS_VERSION");
   has(JS, /console\.log\(`\[Degg_Images_Save_Compare\] JS \$\{DSC_JS_VERSION\} loaded`\)/,
     "js: маркер сборки печатается в консоль");
