@@ -1357,7 +1357,7 @@ const optLabel = modeW && modeW.options ? modeW.options.getOptionLabel : null;
 check("локализация: combo отдаёт RU-подписи режимов через getOptionLabel",
   typeof optLabel === "function"
   && optLabel("Off") === "Выкл." && optLabel("Slider") === "Шторка"
-  && optLabel("Side-by-Side") === "Сбоку" && optLabel("Overlap") === "Наложение"
+  && optLabel("Side-by-Side") === "Рядом" && optLabel("Overlap") === "Наложение"
   && optLabel("Difference") === "Разница" && optLabel("Blink") === "Мигание",
   optLabel ? String(optLabel("Slider")) : "нет getOptionLabel");
 check("локализация: getOptionLabel не тронул options.values (протокольные значения)",

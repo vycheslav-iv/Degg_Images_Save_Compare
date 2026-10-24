@@ -201,7 +201,7 @@ const MODES = ["Off", "Slider", "Side-by-Side", "Overlap", "Difference", "Blink"
 const MODE_LABELS_RU = {
   "Off": "Выкл.",
   "Slider": "Шторка",
-  "Side-by-Side": "Сбоку",
+  "Side-by-Side": "Рядом",
   "Overlap": "Наложение",
   "Difference": "Разница",
   "Blink": "Мигание",
